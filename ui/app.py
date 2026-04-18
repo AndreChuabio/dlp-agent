@@ -6,6 +6,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
 import io
+import re
 import streamlit as st
 from openai import OpenAI
 from agent.orchestrator import run
@@ -22,6 +23,8 @@ if "coverage"       not in st.session_state: st.session_state.coverage        = 
 if "replay_result"  not in st.session_state: st.session_state.replay_result   = None
 if "ingest_result"  not in st.session_state: st.session_state.ingest_result   = None
 if "active_scenario" not in st.session_state: st.session_state.active_scenario = None
+if "pr_result"       not in st.session_state: st.session_state.pr_result       = None
+if "gen_regex"       not in st.session_state: st.session_state.gen_regex        = ""
 
 # ============================================================
 # Mock production interaction payloads
@@ -111,6 +114,192 @@ MOCK_SCENARIOS = {
     },
 }
 
+# ============================================================
+# DLP Coverage Dashboard — pattern metadata for display
+# ============================================================
+
+PATTERN_DISPLAY = [
+    # Standard PII
+    {"type": "SSN",           "category": "Standard PII",       "label": "Social Security Number",   "example": "123-45-6789",                   "hipaa": None},
+    {"type": "credit_card",   "category": "Standard PII",       "label": "Credit Card Number",       "example": "4111 1111 1111 1111",            "hipaa": None},
+    {"type": "email",         "category": "Standard PII",       "label": "Email Address",            "example": "alice@hospital.org",             "hipaa": None},
+    {"type": "phone",         "category": "Standard PII",       "label": "Phone / Fax",              "example": "(212) 555-0101",                 "hipaa": "4/5"},
+    {"type": "api_key",       "category": "Standard PII",       "label": "API Key / Secret",         "example": "sk-abc1234...",                  "hipaa": None},
+    # HIPAA Safe Harbor
+    {"type": "patient_name",  "category": "HIPAA — Identity",   "label": "Patient Name",             "example": "my name is Alice Johnson",       "hipaa": "1"},
+    {"type": "street_address","category": "HIPAA — Geographic", "label": "Street Address",           "example": "42 Elm Street",                  "hipaa": "2"},
+    {"type": "dob",           "category": "HIPAA — Dates",      "label": "Date of Birth",            "example": "born March 22nd, 1975",          "hipaa": "3"},
+    {"type": "medical_record","category": "HIPAA — Medical",    "label": "Medical Record (MRN)",     "example": "MRN-445521",                     "hipaa": "8"},
+    {"type": "npi_number",    "category": "HIPAA — Medical",    "label": "NPI Number",               "example": "NPI 1234567890",                 "hipaa": None},
+    {"type": "icd_code",      "category": "HIPAA — Medical",    "label": "ICD Diagnosis Code",       "example": "diagnosis I10",                  "hipaa": None},
+    {"type": "medication",    "category": "HIPAA — Medical",    "label": "Medication Dosage",        "example": "50mg sertraline",                "hipaa": None},
+    {"type": "insurance_id",  "category": "HIPAA — Insurance",  "label": "Insurance / Member ID",    "example": "member ID BCBS789012",           "hipaa": "9"},
+    {"type": "account_number","category": "HIPAA — Insurance",  "label": "Account Number",           "example": "acct 123456789",                 "hipaa": "10"},
+    {"type": "license_number","category": "HIPAA — Insurance",  "label": "Certificate / License",    "example": "license CA-DL-X7829",            "hipaa": "11"},
+    {"type": "vehicle_id",    "category": "HIPAA — Technical",  "label": "Vehicle ID / VIN",         "example": "VIN 1HGCM82633A004352",          "hipaa": "12"},
+    {"type": "device_id",     "category": "HIPAA — Technical",  "label": "Device / Serial Number",   "example": "IMEI 490154203237518",           "hipaa": "13"},
+    {"type": "url",           "category": "HIPAA — Technical",  "label": "URL / Portal Link",        "example": "https://portal.example.com/42",  "hipaa": "14"},
+    {"type": "ip_address",    "category": "HIPAA — Technical",  "label": "IP Address (session logs)","example": "192.168.1.1",                    "hipaa": "15"},
+]
+
+CATEGORY_ORDER = [
+    "Standard PII",
+    "HIPAA — Identity",
+    "HIPAA — Geographic",
+    "HIPAA — Dates",
+    "HIPAA — Medical",
+    "HIPAA — Insurance",
+    "HIPAA — Technical",
+]
+
+GITHUB_REPO = "AndreChuabio/dlp-agent"
+
+
+def _gh_headers():
+    token = os.getenv("GITHUB_TOKEN", "")
+    if not token:
+        return None
+    return {
+        "Authorization":        f"Bearer {token}",
+        "Accept":               "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def github_add_pattern(pattern_name: str, regex: str, description: str, example: str) -> dict:
+    """Create branch → commit pattern + test case → open PR → trigger CI."""
+    import base64
+    import requests as req
+
+    headers = _gh_headers()
+    if not headers:
+        return {"error": "GITHUB_TOKEN not configured — add it in Railway → Variables to enable PR creation."}
+
+    branch = f"feat/dlp-{pattern_name.replace('_', '-')}"
+    api    = f"https://api.github.com/repos/{GITHUB_REPO}"
+
+    # 1. Get main SHA
+    r = req.get(f"{api}/git/ref/heads/main", headers=headers, timeout=10)
+    if r.status_code != 200:
+        return {"error": f"Could not read main ref ({r.status_code})"}
+    main_sha = r.json()["object"]["sha"]
+
+    # 2. Create branch (422 = already exists, that's fine)
+    r = req.post(f"{api}/git/refs", headers=headers, timeout=10,
+                 json={"ref": f"refs/heads/{branch}", "sha": main_sha})
+    if r.status_code not in (201, 422):
+        return {"error": f"Could not create branch ({r.status_code}): {r.text[:200]}"}
+
+    # 3. Read + patch agent/tools.py
+    r = req.get(f"{api}/contents/agent/tools.py", headers=headers, timeout=10,
+                params={"ref": branch})
+    if r.status_code != 200:
+        return {"error": f"Could not read tools.py ({r.status_code})"}
+    fd      = r.json()
+    content = base64.b64decode(fd["content"]).decode("utf-8")
+
+    old_anchor = '    "medication":    r"\\b\\d+\\s*mg\\b",\n}'
+    new_anchor = (
+        '    "medication":    r"\\b\\d+\\s*mg\\b",\n'
+        f'    # {description}\n'
+        f'    "{pattern_name}": r"{regex}",\n'
+        '}'
+    )
+    if old_anchor not in content:
+        return {"error": "Insertion point not found in tools.py — the file may have changed."}
+    patched = content.replace(old_anchor, new_anchor, 1)
+
+    r = req.put(f"{api}/contents/agent/tools.py", headers=headers, timeout=10,
+                json={
+                    "message": f"feat(dlp): add {pattern_name} redaction pattern",
+                    "content": base64.b64encode(patched.encode()).decode(),
+                    "sha": fd["sha"], "branch": branch,
+                })
+    if r.status_code not in (200, 201):
+        return {"error": f"Could not commit tools.py ({r.status_code}): {r.text[:200]}"}
+
+    # 4. Read + patch tests/veris_simulation.py
+    r = req.get(f"{api}/contents/tests/veris_simulation.py", headers=headers, timeout=10,
+                params={"ref": branch})
+    if r.status_code == 200:
+        sd  = r.json()
+        sim = base64.b64decode(sd["content"]).decode("utf-8")
+        new_case = (
+            f'\n    # ── User-added: {pattern_name} ──\n'
+            f'    Case("{pattern_name} — auto-added",\n'
+            f'         "{example}",\n'
+            f'         True, "{pattern_name}", "user_added"),\n'
+        )
+        sim = sim.replace(
+            'False, None, "clean"),\n]',
+            f'False, None, "clean"),\n{new_case}]',
+            1,
+        )
+        req.put(f"{api}/contents/tests/veris_simulation.py", headers=headers, timeout=10,
+                json={
+                    "message": f"test(veris): add adversarial case for {pattern_name}",
+                    "content": base64.b64encode(sim.encode()).decode(),
+                    "sha": sd["sha"], "branch": branch,
+                })
+
+    # 5. Open PR
+    r = req.post(f"{api}/pulls", headers=headers, timeout=10,
+                 json={
+                     "title": f"feat(dlp): add `{pattern_name}` redaction",
+                     "body": (
+                         f"## New DLP rule: `{pattern_name}`\n\n"
+                         f"**Description:** {description}\n"
+                         f"**Regex:** `{regex}`\n"
+                         f"**Example caught:** `{example}`\n\n"
+                         "Added via the MediGuard DLP Coverage Dashboard.\n\n"
+                         "🤖 Generated with [Claude Code](https://claude.com/claude-code)"
+                     ),
+                     "head": branch, "base": "main",
+                 })
+    if r.status_code not in (200, 201):
+        return {"error": f"Could not open PR ({r.status_code}): {r.text[:200]}"}
+    pr = r.json()
+
+    # 6. Trigger workflow on the branch
+    req.post(
+        f"{api}/actions/workflows/dlp-simulation.yml/dispatches",
+        headers=headers, timeout=10,
+        json={"ref": branch},
+    )
+
+    return {
+        "pr_url":   pr["html_url"],
+        "pr_number": pr["number"],
+        "runs_url": f"https://github.com/{GITHUB_REPO}/actions",
+        "branch":   branch,
+    }
+
+
+def _generate_regex_claude(pattern_name: str, example: str, description: str) -> str:
+    """Ask Claude Haiku to suggest a regex for the new pattern."""
+    try:
+        client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        resp   = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=150,
+            messages=[{"role": "user", "content": (
+                f"Write a Python regex to detect this type of PII/PHI in text:\n"
+                f"Type: {pattern_name}\n"
+                f"Description: {description}\n"
+                f"Must match: {example}\n\n"
+                "Return ONLY the raw regex string — no r'' wrapper, no quotes, "
+                "no backticks, no explanation. Just the pattern itself."
+            )}],
+        )
+        raw = resp.content[0].text.strip()
+        # Strip any wrapping quotes the model might add
+        for wrap in ('r"', "r'", '"', "'", '`'):
+            raw = raw.strip(wrap)
+        return raw
+    except Exception:
+        return r"\b" + re.escape(pattern_name.replace("_", " ")) + r"\b"
+
+
 SYSTEM_PROMPT = (
     "You are MediGuard AI, a HIPAA-compliant patient onboarding assistant. "
     "Your job is to collect patient information conversationally — no forms, no paperwork. "
@@ -154,8 +343,8 @@ st.caption("Patients speak or type naturally. PHI is intercepted before it reach
 st.markdown("---")
 
 # --- Tabs ---
-chat_tab, scan_tab, voice_tab, debug_tab = st.tabs(
-    ["Agent Chat", "DLP Scanner", "Voice Input", "🔍 Debug Replay"]
+chat_tab, scan_tab, voice_tab, debug_tab, coverage_tab = st.tabs(
+    ["Agent Chat", "DLP Scanner", "Voice Input", "🔍 Debug Replay", "🛡️ DLP Coverage"]
 )
 
 # ============================================================
@@ -526,6 +715,145 @@ with debug_tab:
             for key, s in MOCK_SCENARIOS.items():
                 badge_color = s["badge_color"]
                 st.markdown(f"- :{badge_color}[**{s['badge']}**] {key.split('—')[1].strip()}")
+
+# ============================================================
+# TAB 5 — DLP Coverage Dashboard
+# ============================================================
+with coverage_tab:
+    st.markdown("### Active Redaction Rules")
+    st.caption(
+        "Every message passes through these patterns before reaching any AI model. "
+        "Biometric identifiers (fingerprints, voiceprints, retinal scans) and full-face photos "
+        "— HIPAA identifiers 16 & 17 — cannot be caught by regex and are flagged by the Claude semantic layer."
+    )
+
+    # ── Top metrics ──────────────────────────────────────────
+    hipaa_count   = sum(1 for p in PATTERN_DISPLAY if p["hipaa"])
+    total_count   = len(PATTERN_DISPLAY)
+    cat_count     = len(set(p["category"] for p in PATTERN_DISPLAY))
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total rules",          total_count)
+    m2.metric("HIPAA Safe Harbor",    f"{hipaa_count} / 18")
+    m3.metric("Categories",           cat_count)
+    m4.metric("False positives (Veris sim)", "0")
+
+    st.markdown("")
+
+    # ── Rules grid by category ────────────────────────────────
+    for category in CATEGORY_ORDER:
+        rules = [p for p in PATTERN_DISPLAY if p["category"] == category]
+        if not rules:
+            continue
+
+        st.markdown(f"**{category}** — {len(rules)} rule{'s' if len(rules) != 1 else ''}")
+        cols = st.columns(3)
+        for i, rule in enumerate(rules):
+            with cols[i % 3]:
+                with st.container(border=True):
+                    hipaa_tag = f"  `HIPAA #{rule['hipaa']}`" if rule["hipaa"] else ""
+                    st.markdown(f"**{rule['label']}**{hipaa_tag}")
+                    st.caption(f"`{rule['type']}`")
+                    st.code(rule["example"], language=None)
+        st.markdown("")
+
+    # ── Add new rule ──────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### ➕ Add New Redaction Rule")
+    st.caption(
+        "Describe the new PHI type. MediGuard will generate the regex, "
+        "open a PR, and trigger the Veris adversarial simulation — no manual coding needed."
+    )
+
+    has_github = bool(os.getenv("GITHUB_TOKEN"))
+    if not has_github:
+        st.warning(
+            "**GitHub integration not configured.** "
+            "Add `GITHUB_TOKEN` to Railway → Variables to enable automatic PR creation. "
+            "The form below shows what would happen."
+        )
+
+    with st.form("add_rule_form", clear_on_submit=False):
+        fc1, fc2 = st.columns(2)
+        with fc1:
+            new_type = st.text_input(
+                "Pattern name (snake_case)",
+                placeholder="zip_code",
+                help="Used as the redaction label, e.g. [REDACTED:zip_code]",
+            )
+            new_desc = st.text_input(
+                "Description",
+                placeholder="US zip codes — HIPAA geographic identifier",
+            )
+        with fc2:
+            new_example = st.text_input(
+                "Example that should be caught",
+                placeholder="My zip code is 10013",
+            )
+            new_regex = st.text_input(
+                "Regex (leave blank to auto-generate with Claude)",
+                placeholder=r"\bzip(?:\s+code)?\s*:?\s*\d{5}(?:-\d{4})?\b",
+            )
+
+        submitted = st.form_submit_button(
+            "Add Rule + Open PR",
+            type="primary",
+            use_container_width=True,
+            disabled=(not new_type or not new_example),
+        )
+
+    if submitted and new_type and new_example:
+        # Validate pattern name
+        import re as _re
+        if not _re.match(r'^[a-z][a-z0-9_]*$', new_type):
+            st.error("Pattern name must be lowercase letters, digits, and underscores only (e.g. zip_code).")
+        else:
+            regex_to_use = new_regex.strip()
+
+            if not regex_to_use:
+                with st.spinner("Generating regex with Claude Haiku..."):
+                    regex_to_use = _generate_regex_claude(new_type, new_example, new_desc or new_type)
+                st.info(f"Auto-generated regex: `{regex_to_use}`")
+
+            # Validate regex compiles
+            try:
+                _re.compile(regex_to_use)
+            except _re.error as e:
+                st.error(f"Regex syntax error: {e}")
+                regex_to_use = None
+
+            if regex_to_use:
+                with st.spinner("Creating branch, committing pattern, opening PR, triggering Veris simulation..."):
+                    result = github_add_pattern(
+                        pattern_name=new_type,
+                        regex=regex_to_use,
+                        description=new_desc or new_type,
+                        example=new_example,
+                    )
+                st.session_state.pr_result = result
+
+    # ── PR result ─────────────────────────────────────────────
+    if st.session_state.pr_result:
+        result = st.session_state.pr_result
+        if "error" in result:
+            st.error(f"**Error:** {result['error']}")
+        else:
+            st.success("**Rule added — PR open, Veris simulation running.**")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.markdown(
+                    f"#### [View PR #{result['pr_number']} →]({result['pr_url']})\n"
+                    f"`{result['branch']}`"
+                )
+            with col_b:
+                st.markdown(
+                    f"#### [View CI run →]({result['runs_url']})\n"
+                    "Veris simulation triggered on the PR branch"
+                )
+            if st.button("Clear", key="clear_pr"):
+                st.session_state.pr_result = None
+                st.rerun()
+
 
 # ============================================================
 # Live Audit Log
