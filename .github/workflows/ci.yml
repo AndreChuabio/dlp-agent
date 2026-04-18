@@ -3,7 +3,7 @@ name: CI — DLP + Voicerun Agents
 on:
   workflow_dispatch:
   pull_request:
-    branches: [main]
+    branches: [develop, main]
 
 env:
   PYTHON_VERSION: "3.11"
