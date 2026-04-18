@@ -1,0 +1,5 @@
+# Raw session files contain real PHI — never commit them
+*.raw.json
+
+# Redacted session files are safe to commit and share
+# *.redacted.json  ← intentionally NOT ignored
