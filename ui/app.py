@@ -478,7 +478,13 @@ with scan_tab:
 # TAB 3 — Voice input
 # ============================================================
 with voice_tab:
-    st.caption("Record a patient message. Transcribed via Whisper then scanned before reaching any model.")
+    voicerun_number = os.getenv("VOICERUN_PHONE_NUMBER", "")
+    if voicerun_number:
+        st.info(f"Live phone demo: call **{voicerun_number}** — speak naturally, PHI is intercepted before reaching any AI.")
+    else:
+        st.info("Set VOICERUN_PHONE_NUMBER in .env to enable live phone demo.")
+    st.markdown("---")
+    st.caption("Or record a patient message below. Transcribed via Whisper then scanned before reaching any model.")
     audio = st.audio_input("Record patient message")
     if audio and st.button("Transcribe + Scan", type="primary", key="voice_scan"):
         with st.spinner("Transcribing..."):

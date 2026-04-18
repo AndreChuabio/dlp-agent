@@ -2,4 +2,5 @@ profiles:
   default:
     targets:
       dlp-health-agent:
+        config_synced_at: '2026-04-18T17:06:52.970089Z'
         environment_id: env_28owwq0q0dng0633a5glk

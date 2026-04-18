@@ -87,6 +87,8 @@ PATTERNS = {
     "icd_code":      r"\b[A-Z]\d{2}\.?\d{0,2}\b",
     # Medications (dosage mentions)
     "medication":    r"\b\d+\s*mg\b",
+    "ip_address":    r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
+    "street_address": r"\b\d+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+(Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln|Way|Court|Ct|Place|Pl)\b",
 }
 
 # --- Step 1: Voicerun transcription ---
