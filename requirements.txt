@@ -1,0 +1,8 @@
+anthropic
+openai
+fastapi
+uvicorn
+streamlit
+python-dotenv
+requests
+voicerun-cli

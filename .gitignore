@@ -1,0 +1,5 @@
+.env
+*.pyc
+__pycache__/
+dlp_audit_log.jsonl
+.DS_Store
