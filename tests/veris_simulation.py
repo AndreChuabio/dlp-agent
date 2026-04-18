@@ -162,6 +162,11 @@ CASES: list[Case] = [
     Case("General statement",
          "The medication seems to be working well.",
          False, None, "clean"),
+
+    # ── User-added: zip_code ──
+    Case("zip_code — auto-added",
+         "My zip code is 10013",
+         True, "zip_code", "user_added"),
 ]
 
 
