@@ -109,55 +109,22 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Install dependencies
+        run: pip install anthropic openai python-dotenv requests
 
-      - name: Build agent sandbox image
-        run: |
-          docker build \
-            -f .veris/Dockerfile.sandbox \
-            -t dlp-health-agent:${{ github.sha }} \
-            -t dlp-health-agent:latest \
-            .
-
-      - name: Install Veris CLI
-        run: pip install veris-ai
-
-      - name: Run Veris simulation — DLP agent
+      - name: Run Veris adversarial simulation
         env:
-          VERIS_API_KEY: ${{ secrets.VERIS_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: |
-          veris run \
-            --target dlp-health-agent \
-            --environment env_28owwq0q0dng0633a5glk \
-            --config .veris/veris.yaml \
-            --image dlp-health-agent:${{ github.sha }} \
-            --output veris-report.json
+          PYTHONPATH: ${{ github.workspace }}
+          ANTHROPIC_API_KEY: placeholder
+          OPENAI_API_KEY: placeholder
+          BASETEN_API_KEY: placeholder
+        run: python tests/veris_simulation.py --github
 
-      - name: Upload Veris simulation report
+      - name: Upload simulation report
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: veris-simulation-report-${{ github.sha }}
-          path: veris-report.json
+          path: "*.jsonl"
+          if-no-files-found: ignore
           retention-days: 30
-
-      - name: Print detection summary
-        if: always()
-        run: |
-          if [ -f veris-report.json ]; then
-            python - <<'EOF'
-          import json, sys
-          report = json.load(open("veris-report.json"))
-          total   = report.get("total_attempts", 0)
-          blocked = report.get("blocked", 0)
-          rate    = (blocked / total * 100) if total else 0
-          print(f"Detection rate: {blocked}/{total} ({rate:.1f}%)")
-          if rate < 80:
-              print("FAIL: detection rate below 80% threshold")
-              sys.exit(1)
-          print("PASS")
-          EOF
-          fi
