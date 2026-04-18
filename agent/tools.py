@@ -256,35 +256,172 @@ EXTRACTION_PROMPT = """You are a structured data extraction assistant for a medi
 Given a voice conversation transcript, extract any patient information mentioned so far.
 Respond with ONLY valid JSON — no markdown, no explanation.
 
-Format: {{"patient_name": "<name or null>", "insurance_id": "<id or null>", "reason": "<reason or null>", "dob": "<YYYY-MM-DD or null>", "phone": "<phone or null>"}}
+Format: {{"patient_name": "<name or null>", "insurance_id": "<id or null>", "reason": "<primary concern or reason for visit or null>", "dob": "<YYYY-MM-DD or null>", "phone": "<phone or null>"}}
 
 Rules:
 - Only include fields the patient has explicitly stated.
 - Use null for fields not yet mentioned.
 - Extract the most recent value if the patient corrected themselves.
+- For "reason", capture the patient's health concern or symptom in their own words.
 
 Transcript:
 {transcript}"""
 
-def extract_patient_info(messages: list[dict]) -> dict:
-    """Extract structured patient fields from conversation history using Claude."""
+def extract_patient_info(messages: list[dict], raw_hint: str = "") -> dict:
+    """Extract structured patient fields from conversation history using Claude.
+
+    raw_hint: the unredacted latest patient message — used to recover fields
+    like DOB or phone that were scrubbed from the LLM-facing transcript.
+    """
     transcript = "\n".join(
         f"{'Patient' if m['role'] == 'user' else 'Agent'}: {m['content']}"
         for m in messages[-8:]
         if isinstance(m.get("content"), str)
     )
-    if not transcript.strip():
+    if not transcript.strip() and not raw_hint:
         return {}
+
+    hint_section = ""
+    if raw_hint:
+        hint_section = (
+            f"\n\nNote — patient's most recent unredacted speech (before privacy scan):\n"
+            f"\"{raw_hint}\"\n"
+            "(Use this to capture structured fields like DOB or phone that may appear "
+            "as [REDACTED:...] tokens in the transcript above.)"
+        )
+
     try:
         response = anthropic_client.messages.create(
             model="claude-opus-4-6",
             max_tokens=200,
-            messages=[{"role": "user", "content": EXTRACTION_PROMPT.format(transcript=transcript)}],
+            messages=[{"role": "user", "content": EXTRACTION_PROMPT.format(transcript=transcript) + hint_section}],
         )
         return json.loads(response.content[0].text.strip())
     except Exception as e:
         logger.error(f"Patient info extraction failed: {e}")
         return {}
+
+
+# --- Patient database ---
+
+_DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "voicerun", "data")
+DOCTORS_FILE = os.path.join(_DATA_DIR, "doctors.json")
+PATIENTS_FILE = os.path.join(_DATA_DIR, "patients.json")
+
+
+def _load_doctors() -> list[dict]:
+    try:
+        with open(DOCTORS_FILE) as f:
+            return json.load(f).get("doctors", [])
+    except Exception as e:
+        logger.error(f"Failed to load doctors: {e}")
+        return []
+
+
+def _load_patients() -> list[dict]:
+    try:
+        with open(PATIENTS_FILE) as f:
+            return json.load(f).get("patients", [])
+    except Exception as e:
+        logger.error(f"Failed to load patients: {e}")
+        return []
+
+
+def _save_patients(patients: list[dict]) -> bool:
+    try:
+        with open(PATIENTS_FILE, "w") as f:
+            json.dump({"patients": patients}, f, indent=2)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save patients: {e}")
+        return False
+
+
+def lookup_patient(name: str) -> dict | None:
+    """Look up a patient by name (exact or partial first/last name match)."""
+    if not name or not name.strip():
+        return None
+    patients = _load_patients()
+    name_clean = name.lower().strip()
+    # Exact match first
+    for p in patients:
+        if p.get("name", "").lower().strip() == name_clean:
+            return p
+    # Partial match: at least 2 shared words, or single-word query matches a name token
+    name_words = set(name_clean.split())
+    for p in patients:
+        db_words = set(p.get("name", "").lower().split())
+        overlap = name_words & db_words
+        if len(overlap) >= 2 or (len(name_words) == 1 and name_words <= db_words):
+            return p
+    return None
+
+
+def save_patient(patient: dict) -> bool:
+    """Insert or update a patient record (matched by name)."""
+    patients = _load_patients()
+    name = patient.get("name", "").lower().strip()
+    if not name:
+        return False
+    for i, p in enumerate(patients):
+        if p.get("name", "").lower().strip() == name:
+            patients[i] = {**p, **{k: v for k, v in patient.items() if v}}
+            logger.info(f"Updated patient record: {name}")
+            return _save_patients(patients)
+    patient["id"] = f"pt_{len(patients) + 1:03d}"
+    patients.append(patient)
+    logger.info(f"Saved new patient record: {name}")
+    return _save_patients(patients)
+
+
+# --- Specialist triage ---
+
+TRIAGE_PROMPT = """You are a medical triage assistant helping a primary care receptionist route patients.
+Based on the patient's concern, pick the BEST matching specialist from the list below.
+
+Patient's concern: {reason}
+
+Available specialists:
+{specialists_list}
+
+Return ONLY valid JSON (no markdown, no code fences):
+{{"specialist_id": "...", "specialist_name": "...", "specialty": "...", "availability": "...", "reason": "one sentence explaining why this specialist is the right fit"}}
+
+Default to the General Practitioner (dr_008) if the concern is unclear, general, or doesn't fit another category."""
+
+
+def triage_specialist(reason: str) -> dict | None:
+    """Use Claude to semantically match a patient's concern to the best specialist."""
+    doctors = _load_doctors()
+    if not doctors:
+        logger.error("No doctors loaded — cannot triage.")
+        return None
+
+    specialists_list = "\n".join(
+        f"- {d['id']}: {d['name']} ({d['specialty']}, available {d['availability']}) "
+        f"— treats: {', '.join(d['conditions'][:6])}"
+        for d in doctors
+    )
+
+    try:
+        response = anthropic_client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=200,
+            messages=[{"role": "user", "content": TRIAGE_PROMPT.format(
+                reason=reason,
+                specialists_list=specialists_list,
+            )}],
+        )
+        raw = response.content[0].text.strip()
+        # Strip accidental markdown fences
+        if raw.startswith("```"):
+            raw = raw.split("```")[1].lstrip("json").strip()
+        result = json.loads(raw)
+        logger.info(f"Triage result: {result.get('specialist_name')} ({result.get('specialty')})")
+        return result
+    except Exception as e:
+        logger.error(f"Triage specialist failed: {e}")
+        return None
 
 
 # --- Full pipeline ---

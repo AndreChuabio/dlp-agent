@@ -1,0 +1,43 @@
+{
+  "patients": [
+    {
+      "id": "pt_001",
+      "name": "Alice Johnson",
+      "dob": "1975-03-22",
+      "phone": "212-555-0101",
+      "insurance_id": "BCBS-789012",
+      "last_visit": "2025-10-15",
+      "conditions": [
+        "hypertension",
+        "high cholesterol"
+      ],
+      "notes": "Takes lisinopril 10mg daily"
+    },
+    {
+      "id": "pt_002",
+      "name": "David Kim",
+      "dob": "1990-07-08",
+      "phone": "646-555-0234",
+      "insurance_id": "UHC-445566",
+      "last_visit": "2025-12-03",
+      "conditions": [
+        "type 2 diabetes",
+        "obesity"
+      ],
+      "notes": "Working with dietitian on weight management plan"
+    },
+    {
+      "id": "pt_003",
+      "name": "Maria Santos",
+      "dob": "1968-11-30",
+      "phone": "917-555-0789",
+      "insurance_id": "AETNA-112233",
+      "last_visit": "2026-01-20",
+      "conditions": [
+        "lower back pain",
+        "arthritis"
+      ],
+      "notes": "Referred to physical therapy in January 2026"
+    }
+  ]
+}
