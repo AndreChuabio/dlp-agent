@@ -261,7 +261,7 @@ def github_add_pattern(pattern_name: str, regex: str, description: str, example:
         "      - uses: actions/checkout@v4\n\n"
         "      - name: Set up Python\n        uses: actions/setup-python@v5\n"
         "        with:\n          python-version: \"3.11\"\n\n"
-        "      - name: Install dependencies\n        run: pip install -r requirements.txt\n\n"
+        "      - name: Install dependencies\n        run: pip install python-dotenv requests anthropic openai\n\n"
         "      - name: Run Veris simulation\n"
         "        run: python tests/veris_simulation.py --github\n"
         "        env:\n"
