@@ -1,0 +1,100 @@
+# Veris simulation configuration
+version: "1.0"
+
+dlp-health-agent:
+  # Uncomment the services your agent calls. dns_aliases should match the
+  # domains your agent makes requests to — they'll be routed to the mock automatically.
+  services:
+
+    # - name: calendar
+    #   dns_aliases:
+    #     - www.googleapis.com
+    #     - calendar.google.com
+    #     - calendar-json.googleapis.com
+    #     - googleapis.com
+    #     - oauth2.googleapis.com
+
+    # - name: crm
+    #   dns_aliases:
+    #     - login.salesforce.com
+    #     - test.salesforce.com
+    #     - your-domain.salesforce.com
+
+    # - name: postgres
+    #   config:
+    #     SCHEMA_PATH: /agent/schemas/schema.sql
+
+    # - name: mcp/stripe
+    #   dns_aliases:
+    #     - mcp.stripe.com
+
+    # - name: mcp/shopify-storefront
+    #   dns_aliases:
+    #     - veris-ai.myshopify.com
+
+    # - name: mcp/shopify-customer
+    #   dns_aliases:
+    #     - veris-ai.account.myshopify.com
+
+    # - name: oracle
+
+    # - name: atlassian/jira
+    #   dns_aliases:
+    #     - api.atlassian.com
+    #     - your-instance.atlassian.net
+
+    # - name: atlassian/confluence
+    #   dns_aliases:
+    #     - api.atlassian.com
+    #     - your-instance.atlassian.net
+
+    # - name: slack
+    #   dns_aliases:
+    #     - slack.com
+    #     - api.slack.com
+
+    # - name: zendesk-support
+    #   dns_aliases:
+    #     - your-subdomain.zendesk.com
+
+    # - name: twilio
+    #   dns_aliases:
+    #     - api.twilio.com
+
+    # - name: hogan
+    #   dns_aliases:
+    #     - api-gateway.wellsfargo.net
+
+    # - name: microsoft/graph
+    #   dns_aliases:
+    #     - graph.microsoft.com
+
+    # - name: microsoft/devops
+    #   dns_aliases:
+    #     - dev.azure.com
+    #     - almsearch.dev.azure.com
+
+    # - name: llm-proxy
+    #   dns_aliases:
+    #     - my-deployment.openai.azure.com
+
+  persona:
+    modality:
+      type: http
+      url: http://localhost:8008/chat
+      method: POST
+      headers:
+        Content-Type: application/json
+      request:
+        message_field: message
+        session_field: session_id
+      response:
+        type: json
+        message_field: response
+        session_field: session_id
+
+  agent:
+    name: MediGuard AI
+    code_path: /agent
+    entry_point: uvicorn api.server:app --host 0.0.0.0 --port 8008
+    port: 8008

@@ -1,0 +1,5 @@
+profiles:
+  default:
+    targets:
+      dlp-health-agent:
+        environment_id: env_28owwq0q0dng0633a5glk

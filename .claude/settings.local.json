@@ -8,7 +8,9 @@
       "Bash(git push *)",
       "Bash(pip install *)",
       "Bash(brew install *)",
-      "Bash(vr *)"
+      "Bash(vr *)",
+      "Bash(python *)",
+      "Bash(veris *)"
     ]
   }
 }
