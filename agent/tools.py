@@ -87,6 +87,8 @@ PATTERNS = {
     "icd_code":      r"\b[A-Z]\d{2}\.?\d{0,2}\b",
     # Medications (dosage mentions)
     "medication":    r"\b\d+\s*mg\b",
+    # US zip codes — HIPAA geographic identifier (#2)
+    "zip_code": r"\bzip(?:\s+code)?\s*:?\s*\d{5}(?:-\d{4})?\b",
 }
 
 # --- Step 1: Voicerun transcription ---
