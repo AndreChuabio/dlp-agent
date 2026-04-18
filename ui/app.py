@@ -16,6 +16,15 @@ import anthropic
 
 st.set_page_config(page_title="MediGuard AI", layout="wide")
 
+# Try to import the Veris simulation runner (works on Python 3.11 / Railway, may fail locally on 3.9)
+try:
+    _tests_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tests")
+    sys.path.insert(0, _tests_dir)
+    from veris_simulation import run_regex_simulation as _run_veris_sim
+    _VERIS_LOCAL = True
+except Exception:
+    _VERIS_LOCAL = False
+
 # --- Session state init ---
 if "messages"       not in st.session_state: st.session_state.messages       = []
 if "patient_info"   not in st.session_state: st.session_state.patient_info   = {}
@@ -25,6 +34,9 @@ if "ingest_result"  not in st.session_state: st.session_state.ingest_result   = 
 if "active_scenario" not in st.session_state: st.session_state.active_scenario = None
 if "pr_result"       not in st.session_state: st.session_state.pr_result       = None
 if "gen_regex"       not in st.session_state: st.session_state.gen_regex        = ""
+if "sim_triggered_at" not in st.session_state: st.session_state.sim_triggered_at = None
+if "sim_run_cache"    not in st.session_state: st.session_state.sim_run_cache    = None
+if "veris_local_report" not in st.session_state: st.session_state.veris_local_report = None
 
 # ============================================================
 # Mock production interaction payloads
@@ -281,6 +293,63 @@ def github_trigger_simulation(branch: str) -> dict:
     if r.status_code == 204:
         return {"ok": True, "runs_url": f"https://github.com/{GITHUB_REPO}/actions"}
     return {"error": f"Trigger failed ({r.status_code}): {r.text[:200]}"}
+
+
+def fetch_latest_sim_run(force: bool = False) -> dict:
+    """Fetch the most recent dlp-simulation.yml run from GitHub Actions.
+
+    Returns a dict with keys: id, status, conclusion, created_at, html_url,
+    run_number, branch  — or  {"error": "..."} / {"none": True}.
+    Results are cached for 15 s to avoid hammering the API on every Streamlit rerun.
+    Pass force=True (e.g., right after triggering) to bypass the cache.
+    """
+    import requests as req
+    import time
+
+    cache = st.session_state.get("sim_run_cache")
+    if not force and cache and (time.time() - cache.get("_fetched_at", 0)) < 15:
+        return cache
+
+    headers = _gh_headers()
+    if not headers:
+        return {"error": "no_token"}
+    try:
+        r = req.get(
+            f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/dlp-simulation.yml/runs",
+            headers=headers,
+            params={"per_page": 5},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return {"error": f"GitHub API {r.status_code}"}
+        runs = r.json().get("workflow_runs", [])
+        if not runs:
+            return {"none": True}
+        latest = runs[0]
+        result = {
+            "_fetched_at": time.time(),
+            "id":          latest["id"],
+            "status":      latest["status"],
+            "conclusion":  latest.get("conclusion"),
+            "created_at":  latest["created_at"],
+            "html_url":    latest["html_url"],
+            "run_number":  latest["run_number"],
+            "branch":      latest.get("head_branch", ""),
+            "recent":      [
+                {
+                    "run_number": x["run_number"],
+                    "conclusion": x.get("conclusion"),
+                    "created_at": x["created_at"],
+                    "html_url":   x["html_url"],
+                    "branch":     x.get("head_branch", ""),
+                }
+                for x in runs[:5]
+            ],
+        }
+        st.session_state.sim_run_cache = result
+        return result
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def _generate_regex_claude(pattern_name: str, example: str, description: str) -> str:
@@ -746,13 +815,110 @@ with coverage_tab:
     total_count   = len(PATTERN_DISPLAY)
     cat_count     = len(set(p["category"] for p in PATTERN_DISPLAY))
 
+    # Run live Veris simulation (cached in session state)
+    if _VERIS_LOCAL and st.session_state.veris_local_report is None:
+        try:
+            st.session_state.veris_local_report = _run_veris_sim()
+        except Exception:
+            st.session_state.veris_local_report = {}
+
+    _vr = st.session_state.veris_local_report or {}
+    detection_pct = _vr.get("detection_rate", "—")
+    fp_count      = _vr.get("false_positives", "—")
+    total_cases   = _vr.get("total", "—")
+
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Total rules",          total_count)
     m2.metric("HIPAA Safe Harbor",    f"{hipaa_count} / 18")
-    m3.metric("Categories",           cat_count)
-    m4.metric("False positives (Veris sim)", "0")
+    m3.metric("Veris detection rate", f"{detection_pct}%" if isinstance(detection_pct, (int, float)) else detection_pct)
+    m4.metric("False positives",      fp_count)
 
     st.markdown("")
+
+    # ── Veris Simulation panel ────────────────────────────────
+    st.markdown("---")
+    st.markdown("### Veris Adversarial Simulation")
+
+    sim_col_left, sim_col_right = st.columns([2, 1])
+    with sim_col_left:
+        if _vr:
+            accuracy  = _vr.get("accuracy", "—")
+            precision = _vr.get("precision", "—")
+            tp = _vr.get("true_positives", 0)
+            tn = _vr.get("true_negatives", 0)
+            fp_n = _vr.get("false_positives", 0)
+            fn = _vr.get("false_negatives", 0)
+            pass_icon = "🟢 PASS" if (isinstance(detection_pct, (int, float)) and detection_pct >= 70 and fp_n <= 2) else "🔴 FAIL"
+            st.markdown(
+                f"**{pass_icon}** &nbsp;|&nbsp; "
+                f"Detection rate: **{detection_pct}%** &nbsp;|&nbsp; "
+                f"Accuracy: **{accuracy}%** &nbsp;|&nbsp; "
+                f"Precision: **{precision}%**\n\n"
+                f"TP=**{tp}** &nbsp; TN=**{tn}** &nbsp; FP=**{fp_n}** &nbsp; FN=**{fn}** &nbsp; "
+                f"Total cases=**{total_cases}**"
+            )
+            by_cat = _vr.get("by_category", {})
+            if by_cat:
+                cat_lines = []
+                for cat, stats in by_cat.items():
+                    pct = round(stats["correct"] / stats["total"] * 100) if stats["total"] else 0
+                    bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+                    cat_lines.append(f"`{cat:<14}` {bar} {pct}%  ({stats['correct']}/{stats['total']})")
+                with st.expander("Category breakdown"):
+                    st.code("\n".join(cat_lines), language=None)
+        else:
+            st.caption("Live simulation not available in this environment.")
+
+    with sim_col_right:
+        # Latest GitHub Actions run
+        run_data = fetch_latest_sim_run()
+
+        # Check if a recently triggered run is still in progress
+        import time as _time
+        triggered_recently = (
+            st.session_state.sim_triggered_at is not None
+            and _time.time() - st.session_state.sim_triggered_at < 300
+        )
+        if triggered_recently and run_data.get("status") in ("queued", "in_progress"):
+            st.info("⏳ Simulation in progress…")
+
+        if "error" in run_data:
+            if run_data["error"] == "no_token":
+                st.caption("Add `GITHUB_TOKEN` to see CI run history.")
+            else:
+                st.caption(f"Could not fetch run history: {run_data['error']}")
+        elif "none" in run_data:
+            st.caption("No simulation runs found — trigger one below.")
+        else:
+            status     = run_data.get("status", "")
+            conclusion = run_data.get("conclusion", "")
+            if status == "completed":
+                badge = "🟢 passed" if conclusion == "success" else "🔴 failed" if conclusion == "failure" else f"⚪ {conclusion}"
+            elif status == "in_progress":
+                badge = "⏳ running"
+            else:
+                badge = f"⏳ {status}"
+
+            created_str = run_data.get("created_at", "")[:16].replace("T", " ")
+            st.markdown(
+                f"**Latest CI run:** {badge}\n\n"
+                f"Run #{run_data['run_number']} · `{run_data.get('branch', '')}` · {created_str} UTC"
+            )
+            st.markdown(f"[**→ View full results on GitHub Actions**]({run_data['html_url']})")
+
+            if run_data.get("recent"):
+                with st.expander("Run history (last 5)"):
+                    for rx in run_data["recent"]:
+                        conc = rx.get("conclusion") or rx.get("status", "")
+                        ico  = "🟢" if conc == "success" else "🔴" if conc == "failure" else "⏳"
+                        ts   = rx.get("created_at", "")[:16].replace("T", " ")
+                        st.markdown(f"{ico} [Run #{rx['run_number']}]({rx['html_url']}) · `{rx['branch']}` · {ts}")
+
+        if st.button("↺ Refresh run status", key="refresh_sim_status", use_container_width=True):
+            st.session_state.sim_run_cache = None
+            st.rerun()
+
+    st.markdown("---")
 
     # ── Rules grid by category ────────────────────────────────
     for category in CATEGORY_ORDER:
@@ -866,8 +1032,11 @@ with coverage_tab:
                     if "error" in trig:
                         st.error(trig["error"])
                     else:
-                        st.success("Simulation triggered!")
-                        st.markdown(f"[View run →]({trig['runs_url']})")
+                        import time as _t
+                        st.session_state.sim_triggered_at = _t.time()
+                        st.session_state.sim_run_cache = None   # force fresh fetch on next render
+                        st.success("Simulation triggered! Scroll up to watch the run status.")
+                        st.markdown(f"[View all runs →]({trig['runs_url']})")
             with col_c:
                 if st.button("Clear", key="clear_pr", use_container_width=True):
                     st.session_state.pr_result = None
