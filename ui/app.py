@@ -198,16 +198,14 @@ def github_add_pattern(pattern_name: str, regex: str, description: str, example:
     fd      = r.json()
     content = base64.b64decode(fd["content"]).decode("utf-8")
 
-    old_anchor = '    "medication":    r"\\b\\d+\\s*mg\\b",\n}'
-    new_anchor = (
-        '    "medication":    r"\\b\\d+\\s*mg\\b",\n'
-        f'    # {description}\n'
-        f'    "{pattern_name}": r"{regex}",\n'
-        '}'
-    )
-    if old_anchor not in content:
-        return {"error": "Insertion point not found in tools.py — the file may have changed."}
-    patched = content.replace(old_anchor, new_anchor, 1)
+    # Find the closing } of PATTERNS robustly — works regardless of last entry
+    import re as _re
+    m = _re.search(r'(\n\})\n\n# ---', content)
+    if not m:
+        return {"error": "Could not locate end of PATTERNS dict in tools.py — check that the file still has a '# ---' comment after the closing brace."}
+    insert_pos = m.start(1)
+    new_entry  = f'\n    # {description}\n    "{pattern_name}": r"{regex}",'
+    patched    = content[:insert_pos] + new_entry + content[insert_pos:]
 
     r = req.put(f"{api}/contents/agent/tools.py", headers=headers, timeout=10,
                 json={
@@ -794,21 +792,21 @@ with coverage_tab:
         with fc1:
             new_type = st.text_input(
                 "Pattern name (snake_case)",
-                placeholder="zip_code",
+                value="zip_code",
                 help="Used as the redaction label, e.g. [REDACTED:zip_code]",
             )
             new_desc = st.text_input(
                 "Description",
-                placeholder="US zip codes — HIPAA geographic identifier",
+                value="US zip codes — HIPAA geographic identifier (#2)",
             )
         with fc2:
             new_example = st.text_input(
                 "Example that should be caught",
-                placeholder="My zip code is 10013",
+                value="My zip code is 10013",
             )
             new_regex = st.text_input(
                 "Regex (leave blank to auto-generate with Claude)",
-                placeholder=r"\bzip(?:\s+code)?\s*:?\s*\d{5}(?:-\d{4})?\b",
+                value=r"\bzip(?:\s+code)?\s*:?\s*\d{5}(?:-\d{4})?\b",
             )
 
         submitted = st.form_submit_button(
