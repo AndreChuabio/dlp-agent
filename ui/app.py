@@ -178,10 +178,10 @@ def github_add_pattern(pattern_name: str, regex: str, description: str, example:
     branch = f"feat/dlp-{pattern_name.replace('_', '-')}"
     api    = f"https://api.github.com/repos/{GITHUB_REPO}"
 
-    # 1. Get main SHA
-    r = req.get(f"{api}/git/ref/heads/main", headers=headers, timeout=10)
+    # 1. Get develop SHA (PRs target develop, not main)
+    r = req.get(f"{api}/git/ref/heads/develop", headers=headers, timeout=10)
     if r.status_code != 200:
-        return {"error": f"Could not read main ref ({r.status_code})"}
+        return {"error": f"Could not read develop ref ({r.status_code}) — make sure the develop branch exists."}
     main_sha = r.json()["object"]["sha"]
 
     # 2. Create branch (422 = already exists, that's fine)
@@ -254,25 +254,35 @@ def github_add_pattern(pattern_name: str, regex: str, description: str, example:
                          "Added via the MediGuard DLP Coverage Dashboard.\n\n"
                          "🤖 Generated with [Claude Code](https://claude.com/claude-code)"
                      ),
-                     "head": branch, "base": "main",
+                     "head": branch, "base": "develop",
                  })
     if r.status_code not in (200, 201):
         return {"error": f"Could not open PR ({r.status_code}): {r.text[:200]}"}
     pr = r.json()
 
-    # 6. Trigger workflow on the branch
-    req.post(
-        f"{api}/actions/workflows/dlp-simulation.yml/dispatches",
+    # Simulation is NOT auto-triggered — user clicks "Run Simulation" manually
+    return {
+        "pr_url":    pr["html_url"],
+        "pr_number": pr["number"],
+        "branch":    branch,
+        "repo":      GITHUB_REPO,
+    }
+
+
+def github_trigger_simulation(branch: str) -> dict:
+    """Manually dispatch the Veris simulation workflow on a branch."""
+    import requests as req
+    headers = _gh_headers()
+    if not headers:
+        return {"error": "GITHUB_TOKEN not set"}
+    r = req.post(
+        f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/dlp-simulation.yml/dispatches",
         headers=headers, timeout=10,
         json={"ref": branch},
     )
-
-    return {
-        "pr_url":   pr["html_url"],
-        "pr_number": pr["number"],
-        "runs_url": f"https://github.com/{GITHUB_REPO}/actions",
-        "branch":   branch,
-    }
+    if r.status_code == 204:
+        return {"ok": True, "runs_url": f"https://github.com/{GITHUB_REPO}/actions"}
+    return {"error": f"Trigger failed ({r.status_code}): {r.text[:200]}"}
 
 
 def _generate_regex_claude(pattern_name: str, example: str, description: str) -> str:
@@ -844,21 +854,26 @@ with coverage_tab:
         if "error" in result:
             st.error(f"**Error:** {result['error']}")
         else:
-            st.success("**Rule added — PR open, Veris simulation running.**")
-            col_a, col_b = st.columns(2)
+            st.success(f"**PR opened → `develop`**")
+            col_a, col_b, col_c = st.columns(3)
             with col_a:
                 st.markdown(
                     f"#### [View PR #{result['pr_number']} →]({result['pr_url']})\n"
-                    f"`{result['branch']}`"
+                    f"`{result['branch']}` → `develop`"
                 )
             with col_b:
-                st.markdown(
-                    f"#### [View CI run →]({result['runs_url']})\n"
-                    "Veris simulation triggered on the PR branch"
-                )
-            if st.button("Clear", key="clear_pr"):
-                st.session_state.pr_result = None
-                st.rerun()
+                if st.button("▶ Run Veris Simulation", type="primary", key="trigger_sim", use_container_width=True):
+                    with st.spinner("Triggering simulation..."):
+                        trig = github_trigger_simulation(result["branch"])
+                    if "error" in trig:
+                        st.error(trig["error"])
+                    else:
+                        st.success("Simulation triggered!")
+                        st.markdown(f"[View run →]({trig['runs_url']})")
+            with col_c:
+                if st.button("Clear", key="clear_pr", use_container_width=True):
+                    st.session_state.pr_result = None
+                    st.rerun()
 
 
 # ============================================================
