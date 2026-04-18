@@ -1,0 +1,92 @@
+{
+  "doctors": [
+    {
+      "id": "dr_001",
+      "name": "Dr. Sarah Chen",
+      "specialty": "Cardiologist",
+      "availability": "Mon, Wed, Fri",
+      "conditions": [
+        "chest pain", "high cholesterol", "cholesterol", "heart palpitations",
+        "hypertension", "high blood pressure", "shortness of breath",
+        "irregular heartbeat", "cardiovascular", "dizziness", "heart disease"
+      ]
+    },
+    {
+      "id": "dr_002",
+      "name": "Dr. Marcus Rivera",
+      "specialty": "Gastroenterologist",
+      "availability": "Tue, Thu",
+      "conditions": [
+        "stomach pain", "stomach ache", "acid reflux", "GERD", "bloating",
+        "nausea", "digestive issues", "abdominal pain", "IBS", "constipation",
+        "diarrhea", "heartburn", "bowel issues", "vomiting"
+      ]
+    },
+    {
+      "id": "dr_003",
+      "name": "Dr. Priya Patel",
+      "specialty": "Endocrinologist & Dietitian",
+      "availability": "Mon, Tue, Thu",
+      "conditions": [
+        "diabetes", "type 2 diabetes", "blood sugar", "thyroid", "weight",
+        "obesity", "metabolic syndrome", "nutrition", "hormonal imbalance",
+        "fatigue", "insulin", "overweight", "diet", "cholesterol management"
+      ]
+    },
+    {
+      "id": "dr_004",
+      "name": "Dr. James Kim",
+      "specialty": "Orthopedic Specialist",
+      "availability": "Mon, Wed, Fri",
+      "conditions": [
+        "joint pain", "back pain", "knee pain", "hip pain", "fracture",
+        "arthritis", "sports injury", "neck pain", "shoulder pain",
+        "sprain", "muscle pain", "mobility issues", "lower back", "bone pain"
+      ]
+    },
+    {
+      "id": "dr_005",
+      "name": "Dr. Leila Hassan",
+      "specialty": "Dermatologist",
+      "availability": "Tue, Fri",
+      "conditions": [
+        "rash", "acne", "skin irritation", "mole", "eczema", "psoriasis",
+        "skin infection", "hives", "itching", "hair loss", "nail issues",
+        "sunburn", "wart", "skin discoloration"
+      ]
+    },
+    {
+      "id": "dr_006",
+      "name": "Dr. Michael Torres",
+      "specialty": "Psychiatrist & Mental Health",
+      "availability": "Mon, Tue, Wed, Thu",
+      "conditions": [
+        "anxiety", "depression", "stress", "insomnia", "panic attacks",
+        "mood swings", "mental health", "ADHD", "PTSD", "sleep issues",
+        "burnout", "grief", "trauma", "emotional distress"
+      ]
+    },
+    {
+      "id": "dr_007",
+      "name": "Dr. Aisha Okonkwo",
+      "specialty": "Pulmonologist",
+      "availability": "Wed, Thu, Fri",
+      "conditions": [
+        "cough", "shortness of breath", "asthma", "breathing difficulty",
+        "lung issues", "wheezing", "chronic cough", "respiratory infection",
+        "sleep apnea", "pneumonia", "bronchitis", "allergies", "congestion"
+      ]
+    },
+    {
+      "id": "dr_008",
+      "name": "Dr. Robert Walsh",
+      "specialty": "General Practitioner",
+      "availability": "Mon – Fri",
+      "conditions": [
+        "annual physical", "general checkup", "cold", "flu", "fever",
+        "fatigue", "headache", "general concern", "vaccination",
+        "routine care", "wellness visit", "minor illness", "not sure"
+      ]
+    }
+  ]
+}
