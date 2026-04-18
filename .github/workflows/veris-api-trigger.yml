@@ -10,7 +10,7 @@ on:
 
 env:
   VERIS_ENV_ID: "env_28owwq0q0dng0633a5glk"
-  VERIS_SCENARIO_SET_ID: ${{ vars.VERIS_SCENARIO_SET_ID }}
+  VERIS_SCENARIO_SET_ID: "scenset_mczzu6keewjb3r6aanlm0"
 
 jobs:
   trigger-veris:
