@@ -9,11 +9,6 @@ DLP scans every patient message before it touches the LLM.
 Specialist triage is powered by Claude semantic matching against a mocked doctor database.
 """
 
-import sys
-import os
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
-
 from primfunctions.events import (
     Event, StartEvent, TextEvent, StopEvent,
     TextToSpeechEvent, TimeoutEvent, DebugEvent,
