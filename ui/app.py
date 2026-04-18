@@ -335,6 +335,36 @@ def veris_trigger_run() -> dict:
     return {"error": f"Veris API error ({r.status_code}): {r.text[:200]}"}
 
 
+def veris_fetch_run_report(run_id: str) -> dict:
+    """Fetch status + simulation results for a Veris run ID."""
+    import requests as req
+    api_key = os.getenv("VERIS_API_KEY", "").strip()
+    if not api_key:
+        return {"error": "VERIS_API_KEY not set"}
+    headers = {"Authorization": f"Bearer {api_key}"}
+    r = req.get(f"https://sandbox.api.veris.ai/v1/runs/{run_id}", headers=headers, timeout=15)
+    if r.status_code != 200:
+        return {"error": f"Veris API {r.status_code}: {r.text[:200]}"}
+    run = r.json()
+    status = run["status"]
+    result = {
+        "run_id":      run_id,
+        "status":      status,
+        "completed":   run["completed_simulations"],
+        "total":       run["total_simulations"],
+        "failed":      run["failed_simulations"],
+        "started_at":  run.get("started_at"),
+        "completed_at": run.get("completed_at"),
+        "duration":    run.get("duration_seconds"),
+    }
+    if status == "completed":
+        s = req.get(f"https://sandbox.api.veris.ai/v1/runs/{run_id}/simulations", headers=headers, timeout=15)
+        if s.status_code == 200:
+            sims_data = s.json()
+            result["simulations"] = sims_data.get("items", sims_data) if isinstance(sims_data, dict) else sims_data
+    return result
+
+
 def fetch_latest_sim_run(force: bool = False) -> dict:
     """Fetch the most recent dlp-simulation.yml run from GitHub Actions.
 
@@ -1081,7 +1111,43 @@ with coverage_tab:
             with col_c:
                 if st.button("Clear", key="clear_pr", use_container_width=True):
                     st.session_state.pr_result = None
+                    st.session_state.pop("veris_run_id", None)
+                    st.session_state.pop("veris_report", None)
                     st.rerun()
+
+            # ── Veris results panel ──────────────────────────────
+            run_id = st.session_state.get("veris_run_id")
+            if run_id:
+                st.markdown(f"**Active Veris run:** `{run_id}`")
+                if st.button("🔄 Check Results", key="check_veris", use_container_width=False):
+                    with st.spinner("Fetching run status from Veris..."):
+                        report = veris_fetch_run_report(run_id)
+                    st.session_state.veris_report = report
+
+            report = st.session_state.get("veris_report")
+            if report:
+                if "error" in report:
+                    st.error(report["error"])
+                else:
+                    status = report["status"]
+                    color  = {"completed": "green", "failed": "red", "running": "orange", "provisioning": "blue"}.get(status, "gray")
+                    st.markdown(f"**Status:** :{color}[**{status}**]")
+                    st.markdown(f"{report['completed']}/{report['total']} simulations complete · {report['failed']} failed")
+                    if report.get("duration"):
+                        st.caption(f"Duration: {report['duration']:.0f}s")
+                    if status != "completed":
+                        st.info("Run still in progress — hit Check Results again to refresh.")
+                    elif report.get("simulations"):
+                        sims = report["simulations"]
+                        st.markdown(f"#### Veris Simulation Results — {len(sims)} scenarios")
+                        passed = sum(1 for s in sims if not s.get("failed"))
+                        st.markdown(f"**{passed}/{len(sims)} passed**")
+                        for sim in sims[:10]:
+                            sid    = sim.get("id", "")[:20]
+                            result_val = sim.get("result") or sim.get("status", "")
+                            st.markdown(f"- `{sid}` — {result_val}")
+                        if len(sims) > 10:
+                            st.caption(f"…and {len(sims) - 10} more")
 
 
 # ============================================================
