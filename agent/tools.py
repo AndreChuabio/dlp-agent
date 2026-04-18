@@ -73,34 +73,38 @@ def regex_scan(text: str) -> list[dict]:
 
 # --- Step 3: Baseten triage ---
 
+# Swap BASETEN_MODEL to test different models — uses OpenAI-compatible API
+BASETEN_BASE_URL = "https://inference.baseten.co/v1"
+BASETEN_MODEL = os.getenv("BASETEN_MODEL", "deepseek-ai/DeepSeek-V3.1")
+
 def baseten_triage(text: str) -> bool:
     """
-    Fast binary triage via Baseten. Returns True if text should be deep-scanned.
-    Model ID and API key read from env — swap BASETEN_MODEL_ID freely when testing.
+    Fast binary triage via Baseten DeepSeek. Returns True if text should be deep-scanned.
+    Uses OpenAI-compatible endpoint — swap BASETEN_MODEL in env to test different models.
     """
     api_key = os.getenv("BASETEN_API_KEY")
-    model_id = os.getenv("BASETEN_MODEL_ID")
 
-    if not api_key or not model_id:
+    if not api_key:
         logger.warning("Baseten not configured — defaulting to escalate.")
         return True
 
     prompt = (
-        "Does the following text contain any sensitive, private, or protected health information? "
+        "Does the following text contain any sensitive, private, or protected health information "
+        "such as patient names, diagnoses, medications, medical record numbers, or insurance info? "
         "Reply with only YES or NO.\n\n"
         f"Text: {text}"
     )
 
     try:
-        resp = requests.post(
-            f"https://model-{model_id}.api.baseten.co/production/predict",
-            headers={"Authorization": f"Api-Key {api_key}"},
-            json={"prompt": prompt},
-            timeout=10,
+        baseten_client = OpenAI(api_key=api_key, base_url=BASETEN_BASE_URL)
+        response = baseten_client.chat.completions.create(
+            model=BASETEN_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=5,
+            temperature=0,
         )
-        resp.raise_for_status()
-        output = resp.json().get("output", "").strip().upper()
-        logger.info(f"Baseten triage result: {output}")
+        output = response.choices[0].message.content.strip().upper()
+        logger.info(f"Baseten triage result ({BASETEN_MODEL}): {output}")
         return "YES" in output
     except Exception as e:
         logger.error(f"Baseten triage failed: {e} — defaulting to escalate.")
