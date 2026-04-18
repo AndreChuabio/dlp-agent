@@ -134,11 +134,13 @@ async def handler(event: Event, context: Context):
     if isinstance(event, StartEvent):
         configure_provider(PROVIDER, voicerun_managed=True)
 
-        # Voicerun injects secrets via context.variables, not os.environ/.env
-        for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "BASETEN_API_KEY", "BASETEN_MODEL"):
-            val = context.variables.get(key)
-            if val:
-                os.environ[key] = val
+        # Read API keys from context.variables (set in Voicerun environment dashboard)
+        context.set_data("api_keys", {
+            "ANTHROPIC_API_KEY": context.variables.get("ANTHROPIC_API_KEY"),
+            "OPENAI_API_KEY":    context.variables.get("OPENAI_API_KEY"),
+            "BASETEN_API_KEY":   context.variables.get("BASETEN_API_KEY"),
+            "BASETEN_MODEL":     context.variables.get("BASETEN_MODEL", "deepseek-ai/DeepSeek-V3.1"),
+        })
 
         context.set_data("patient_info", {})
         context.set_data("is_returning", None)   # None = not yet checked
@@ -158,8 +160,10 @@ async def handler(event: Event, context: Context):
         raw_message = event.data.get("text", "")
         session_id = getattr(context, "session_id", "voicerun-session")
 
+        api_keys = context.get_data("api_keys") or {}
+
         # --- 1. DLP scan — raw speech never reaches the LLM ---
-        dlp_result = scan_and_clean(raw_message, user_id=session_id)
+        dlp_result = scan_and_clean(raw_message, user_id=session_id, api_keys=api_keys)
         yield DebugEvent(
             event_name="dlp_scan",
             event_data={
@@ -189,7 +193,7 @@ async def handler(event: Event, context: Context):
             }
             for m in messages
         ]
-        new_info = extract_patient_info(raw_msgs, raw_hint=raw_message)
+        new_info = extract_patient_info(raw_msgs, raw_hint=raw_message, api_keys=api_keys)
 
         # Merge: accumulate across turns, don't overwrite with null
         current_info = context.get_data("patient_info") or {}
@@ -241,7 +245,7 @@ async def handler(event: Event, context: Context):
         reason = merged_info.get("reason")
 
         if reason and not triage_done and is_returning is not None:
-            result = triage_specialist(reason)
+            result = triage_specialist(reason, api_keys=api_keys)
             if result:
                 context.set_data("triage_done", True)
                 context.set_data("triage_result", result)
