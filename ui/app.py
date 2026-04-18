@@ -10,7 +10,10 @@ import re
 import streamlit as st
 from openai import OpenAI
 from agent.orchestrator import run
-from agent.tools import scan_and_clean, extract_patient_info, search_insurance_coverage
+from agent.tools import (
+    scan_and_clean, extract_patient_info, search_insurance_coverage,
+    lookup_patient, save_patient, triage_specialist,
+)
 from agent.replay import ingest_payload, replay_session
 import anthropic
 
@@ -25,6 +28,14 @@ if "ingest_result"  not in st.session_state: st.session_state.ingest_result   = 
 if "active_scenario" not in st.session_state: st.session_state.active_scenario = None
 if "pr_result"       not in st.session_state: st.session_state.pr_result       = None
 if "gen_regex"       not in st.session_state: st.session_state.gen_regex        = ""
+# Voice session state
+if "voice_turns"     not in st.session_state: st.session_state.voice_turns      = []
+if "voice_ctx"       not in st.session_state: st.session_state.voice_ctx        = {
+    "patient_info": {}, "is_returning": None, "db_patient": None,
+    "triage_result": None, "triage_done": False,
+}
+if "voice_session_id" not in st.session_state: st.session_state.voice_session_id = None
+if "voice_saved"      not in st.session_state: st.session_state.voice_saved      = False
 
 # ============================================================
 # Mock production interaction payloads
@@ -475,31 +486,313 @@ with scan_tab:
             st.warning("Enter a message to scan.")
 
 # ============================================================
-# TAB 3 — Voice input
+# TAB 3 — Voice Session (full pipeline, recorded)
 # ============================================================
 with voice_tab:
-    st.caption("Record a patient message. Transcribed via Whisper then scanned before reaching any model.")
-    audio = st.audio_input("Record patient message")
-    if audio and st.button("Transcribe + Scan", type="primary", key="voice_scan"):
-        with st.spinner("Transcribing..."):
-            try:
-                client       = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-                audio_bytes  = io.BytesIO(audio.read())
-                audio_bytes.name = "recording.wav"
-                transcript   = client.audio.transcriptions.create(model="whisper-1", file=audio_bytes)
-                transcribed_text = transcript.text
-                st.info(f"Transcript: {transcribed_text}")
-            except Exception as e:
-                st.error(f"Transcription failed: {e}")
-                transcribed_text = None
+    from datetime import datetime
 
-        if transcribed_text:
-            with st.spinner("Scanning..."):
-                result = run(text=transcribed_text, user_id=user_id)
-            st.success("SAFE TO SEND") if result["safe_to_send"] else st.error(
-                f"BLOCKED — {len(result['regex_findings']) + len(result['semantic_findings'])} finding(s)"
+    # ── Header ───────────────────────────────────────────────
+    st.markdown("### Voice Agent — Maple Grove Medical")
+    st.caption(
+        "Speak as the patient. Every utterance is DLP-scanned before it touches any AI model. "
+        "The full pipeline (DLP → extract → lookup → triage) runs on each turn. "
+        "The session is recorded and replayable in the Debug Replay tab."
+    )
+
+    vcol1, vcol2 = st.columns([3, 1])
+    with vcol2:
+        if st.button("🔄 New Call", key="voice_new_call", use_container_width=True):
+            # Save current session before clearing if there are turns
+            if st.session_state.voice_turns and not st.session_state.voice_saved:
+                sid = st.session_state.voice_session_id or f"voice-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}"
+                _save_voice_session(sid, st.session_state.voice_turns)
+            st.session_state.voice_turns      = []
+            st.session_state.voice_ctx        = {
+                "patient_info": {}, "is_returning": None, "db_patient": None,
+                "triage_result": None, "triage_done": False,
+            }
+            st.session_state.voice_session_id = f"voice-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}"
+            st.session_state.voice_saved      = False
+            st.rerun()
+
+    with vcol1:
+        st.caption(
+            "💡 For a real phone call: `cd voicerun/dlp-health-agent && voicerun dev`"
+        )
+
+    # Initialise session ID on first load
+    if not st.session_state.voice_session_id:
+        st.session_state.voice_session_id = f"voice-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}"
+
+    st.markdown("---")
+
+    # ── Helper: save session to sessions/ for Debug Replay ───
+    def _save_voice_session(session_id: str, turns: list) -> str:
+        """Persist voice turns as a replayable session file."""
+        from pathlib import Path
+        sessions_dir = Path("sessions")
+        sessions_dir.mkdir(exist_ok=True)
+        path = sessions_dir / f"{session_id}.redacted.json"
+        phi_count = sum(t.get("dlp", {}).get("regex_hits", 0) for t in turns if t["role"] == "user")
+        phi_types = []
+        for t in turns:
+            if t["role"] == "user":
+                phi_types.extend(t.get("dlp", {}).get("finding_types", []))
+        payload = {
+            "session_name":  session_id,
+            "ingested_at":   datetime.utcnow().isoformat(),
+            "source":        "voicerun",
+            "phi_findings":  phi_count,
+            "finding_types": list(set(phi_types)),
+            "turns": [
+                {"role": t["role"], "text": t["redacted"] if t["role"] == "user" else t["text"]}
+                for t in turns
+            ],
+        }
+        path.write_text(json.dumps(payload, indent=2))
+        return str(path)
+
+    # ── Replay existing turns ─────────────────────────────────
+    for turn in st.session_state.voice_turns:
+        role = turn["role"]
+        if role == "agent":
+            with st.chat_message("assistant"):
+                st.markdown(turn["text"])
+                if turn.get("triage"):
+                    t = turn["triage"]
+                    st.success(f"Triage → **{t['specialist_name']}** ({t['specialty']})")
+        else:
+            with st.chat_message("user"):
+                st.markdown(f"*\"{turn['raw']}\"*")
+                dlp = turn.get("dlp", {})
+                hits = dlp.get("regex_hits", 0) + dlp.get("semantic_hits", 0)
+                if hits:
+                    st.error(
+                        f"DLP caught {hits} finding(s): "
+                        f"`{', '.join(dlp.get('finding_types', []))}`  \n"
+                        f"Sent to LLM as: `{turn['redacted']}`"
+                    )
+                else:
+                    st.caption("DLP: clean")
+                # Pipeline trace
+                with st.expander("Pipeline trace", expanded=False):
+                    if turn.get("patient_info"):
+                        info = {k: v for k, v in turn["patient_info"].items() if v and v not in ("null", "")}
+                        if info:
+                            st.markdown("**Extracted:**")
+                            for k, v in info.items():
+                                st.markdown(f"- `{k}`: {v}")
+                    lookup = turn.get("lookup")
+                    if lookup:
+                        if lookup.get("found"):
+                            st.success(f"Returning patient: **{lookup['name']}**")
+                            if lookup.get("conditions"):
+                                st.caption(f"Conditions on file: {', '.join(lookup['conditions'])}")
+                        else:
+                            st.info(f"New patient: **{lookup['name']}**")
+
+    # ── Audio input for next patient turn ────────────────────
+    ctx   = st.session_state.voice_ctx
+    turns = st.session_state.voice_turns
+    triage_done = ctx.get("triage_done", False)
+
+    if not triage_done:
+        audio = st.audio_input("🎤 Speak as the patient", key=f"voice_audio_{len(turns)}")
+
+        if audio:
+            openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+            # Step 1 — Transcribe
+            with st.spinner("Transcribing..."):
+                try:
+                    audio_bytes      = io.BytesIO(audio.read())
+                    audio_bytes.name = "recording.wav"
+                    transcript       = openai_client.audio.transcriptions.create(
+                        model="whisper-1", file=audio_bytes
+                    )
+                    raw_text = transcript.text
+                except Exception as e:
+                    st.error(f"Transcription failed: {e}")
+                    raw_text = None
+
+            if raw_text:
+                # Step 2 — DLP scan
+                with st.spinner("DLP scan..."):
+                    dlp_result = scan_and_clean(raw_text, user_id=st.session_state.voice_session_id)
+                clean_text = dlp_result["clean"]
+                regex_hits = len(dlp_result["regex_findings"])
+                sem_hits   = len(dlp_result["semantic_findings"])
+                ftypes     = (
+                    [f["type"] for f in dlp_result["regex_findings"]] +
+                    [f["type"] for f in dlp_result["semantic_findings"]]
+                )
+
+                # Step 3 — Extract patient info
+                all_msgs = [
+                    {"role": t["role"] if t["role"] != "agent" else "assistant",
+                     "content": t["redacted"] if t["role"] == "user" else t["text"]}
+                    for t in turns
+                ] + [{"role": "user", "content": clean_text}]
+
+                with st.spinner("Extracting patient info..."):
+                    new_info = extract_patient_info(all_msgs, raw_hint=raw_text)
+
+                merged = {**ctx["patient_info"]}
+                for k, v in new_info.items():
+                    if v and v not in ("null", None, ""):
+                        merged[k] = v
+                ctx["patient_info"] = merged
+
+                # Step 4 — Patient lookup (once, on first name)
+                lookup_event = None
+                if merged.get("patient_name") and ctx["is_returning"] is None:
+                    with st.spinner("Looking up patient..."):
+                        db = lookup_patient(merged["patient_name"])
+                    if db:
+                        ctx["is_returning"] = True
+                        ctx["db_patient"]   = db
+                        lookup_event = {"found": True, "name": db["name"], "conditions": db.get("conditions", [])}
+                    else:
+                        ctx["is_returning"] = False
+                        lookup_event = {"found": False, "name": merged["patient_name"]}
+
+                # Step 5 — Triage (once, when concern is known)
+                triage_event = None
+                if (merged.get("reason") and not ctx["triage_done"]
+                        and ctx["is_returning"] is not None):
+                    with st.spinner("Triaging to specialist..."):
+                        t_result = triage_specialist(merged["reason"])
+                    if t_result:
+                        ctx["triage_done"]   = True
+                        ctx["triage_result"] = t_result
+                        triage_event         = t_result
+                        # Save new patients after triage
+                        if not ctx["is_returning"]:
+                            save_patient({
+                                "name":       merged.get("patient_name", ""),
+                                "dob":        merged.get("dob", ""),
+                                "phone":      merged.get("phone", ""),
+                                "conditions": [merged["reason"]],
+                                "last_visit": datetime.utcnow().strftime("%Y-%m-%d"),
+                            })
+
+                # Record user turn
+                turns.append({
+                    "role":         "user",
+                    "raw":          raw_text,
+                    "redacted":     clean_text,
+                    "dlp":          {"regex_hits": regex_hits, "semantic_hits": sem_hits, "finding_types": ftypes},
+                    "patient_info": dict(merged),
+                    "lookup":       lookup_event,
+                    "triage":       triage_event,
+                })
+
+                # Step 6 — LLM response
+                with st.spinner("Agent responding..."):
+                    try:
+                        anth_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+                        db_patient  = ctx.get("db_patient")
+                        triage_res  = ctx.get("triage_result")
+                        is_ret      = ctx.get("is_returning")
+
+                        sys_prompt = (
+                            "You are a warm, efficient primary care receptionist at Maple Grove Medical Clinic. "
+                            "Your mission: onboard patients and triage them to the right specialist. "
+                            "All patient messages have been pre-scanned by a HIPAA DLP layer. "
+                            "This is a voice call — keep every response to 1–2 sentences, warm and natural.\n\n"
+                        )
+                        if triage_res:
+                            sys_prompt += (
+                                f"TRIAGE COMPLETE: Recommend {triage_res['specialist_name']} "
+                                f"({triage_res['specialty']}) — {triage_res['reason']}. "
+                                "Tell the patient warmly. Mention no GP visit is needed.\n"
+                            )
+                        elif is_ret and db_patient:
+                            sys_prompt += (
+                                f"RETURNING PATIENT: {db_patient['name']}. "
+                                f"Conditions on file: {', '.join(db_patient.get('conditions', []))}. "
+                                "Welcome them back, ask what brings them in.\n"
+                            )
+                        elif is_ret is False:
+                            collected = {k: v for k, v in merged.items() if v and v not in ("null", "")}
+                            needed = [x for x in ["patient_name", "dob", "phone", "reason"] if not collected.get(x)]
+                            sys_prompt += f"NEW PATIENT. Collected: {collected}. Still need: {needed}. Ask for one item at a time.\n"
+                        else:
+                            sys_prompt += "You haven't identified the patient yet. Ask for their name.\n"
+
+                        history = [
+                            {"role": t["role"] if t["role"] != "agent" else "assistant",
+                             "content": t["redacted"] if t["role"] == "user" else t["text"]}
+                            for t in turns
+                        ]
+                        resp = anth_client.messages.create(
+                            model="claude-haiku-4-5-20251001",
+                            max_tokens=200,
+                            system=sys_prompt,
+                            messages=history,
+                        )
+                        agent_text = resp.content[0].text
+                    except Exception as e:
+                        agent_text = f"I apologize, I ran into a brief issue. Could you repeat that? ({e})"
+
+                # Step 7 — TTS
+                tts_audio = None
+                try:
+                    tts_resp  = openai_client.audio.speech.create(
+                        model="tts-1", voice="alloy", input=agent_text, response_format="mp3"
+                    )
+                    tts_audio = tts_resp.content
+                except Exception:
+                    pass  # TTS is best-effort; text response still shows
+
+                turns.append({
+                    "role":   "agent",
+                    "text":   agent_text,
+                    "triage": triage_event,
+                })
+
+                st.session_state.voice_ctx   = ctx
+                st.session_state.voice_turns = turns
+
+                # Auto-save session after every exchange
+                _save_voice_session(
+                    st.session_state.voice_session_id,
+                    st.session_state.voice_turns,
+                )
+                st.session_state.voice_saved = True
+
+                # Play TTS inline
+                if tts_audio:
+                    st.audio(tts_audio, format="audio/mp3", autoplay=True)
+
+                st.rerun()
+
+    else:
+        # Call complete — triage resolved
+        st.success("**Call complete — patient triaged.**")
+        t = ctx["triage_result"]
+        st.info(
+            f"**{t['specialist_name']}** ({t['specialty']})  \n"
+            f"*{t.get('reason', '')}*"
+        )
+
+    # ── Session recording footer ──────────────────────────────
+    if turns:
+        st.markdown("---")
+        rcol1, rcol2 = st.columns(2)
+        with rcol1:
+            sid = st.session_state.voice_session_id
+            st.caption(f"Session: `{sid}`")
+            phi_total = sum(
+                t.get("dlp", {}).get("regex_hits", 0) + t.get("dlp", {}).get("semantic_hits", 0)
+                for t in turns if t["role"] == "user"
             )
-            st.text_area("Redacted output", value=result["clean"], disabled=True)
+            st.metric("PHI findings intercepted", phi_total)
+        with rcol2:
+            if st.button("📋 View in Debug Replay", key="voice_to_replay", use_container_width=True):
+                _save_voice_session(sid, turns)
+                st.session_state.voice_saved = True
+                st.info(f"Saved as `{sid}` — load it in the Debug Replay tab.")
 
 # ============================================================
 # TAB 4 — Debug Replay
@@ -516,12 +809,32 @@ with debug_tab:
     left_col, right_col = st.columns([1, 2], gap="large")
 
     with left_col:
-        scenario_key = st.selectbox(
-            "Load scenario",
-            list(MOCK_SCENARIOS.keys()),
-            index=0,
+        # Merge mock scenarios + any saved voice sessions
+        from pathlib import Path as _Path
+        _voice_sessions = sorted(
+            [p.stem.replace(".redacted", "") for p in _Path("sessions").glob("voice-*.redacted.json")]
+            if _Path("sessions").exists() else [],
+            reverse=True,
         )
-        scenario = MOCK_SCENARIOS[scenario_key]
+        _voice_options  = {f"🎤 {s}": s for s in _voice_sessions}
+        _all_options    = list(MOCK_SCENARIOS.keys()) + list(_voice_options.keys())
+
+        scenario_key = st.selectbox("Load scenario", _all_options, index=0)
+
+        if scenario_key in MOCK_SCENARIOS:
+            scenario = MOCK_SCENARIOS[scenario_key]
+        else:
+            # Voice session — build a synthetic scenario card
+            _vsid = _voice_options[scenario_key]
+            scenario = {
+                "badge": "🎤 Voice Recording",
+                "badge_color": "blue",
+                "description": f"Recorded voice session `{_vsid}`. Replay to inspect DLP interception and triage.",
+                "known_issue": None,
+                "expected": "Replay recorded patient call",
+                "turns": [],  # loaded from file by ingest_payload
+                "_voice_session_id": _vsid,
+            }
 
         # Badge + description
         badge_color = scenario["badge_color"]
@@ -535,35 +848,53 @@ with debug_tab:
 
         st.markdown("")
 
-        # Raw payload preview
-        with st.expander("View raw payload ⚠️ contains PHI", expanded=False):
-            st.caption("This is what arrives from the production logging system — exactly what an employee should NOT paste into Claude.")
-            st.code(
-                json.dumps(scenario["turns"], indent=2),
-                language="json",
-            )
+        # Raw payload preview (mock scenarios only)
+        is_voice = "_voice_session_id" in scenario
+        if not is_voice:
+            with st.expander("View raw payload ⚠️ contains PHI", expanded=False):
+                st.caption("This is what arrives from the production logging system — exactly what an employee should NOT paste into Claude.")
+                st.code(json.dumps(scenario["turns"], indent=2), language="json")
+        else:
+            st.info("Recorded voice session — already DLP-stripped on capture.")
 
         run_button = st.button("Ingest + Replay", type="primary", use_container_width=True)
 
         if run_button:
-            session_name = "demo-" + scenario_key.split("—")[0].strip().replace(" ", "-").lower()
             st.session_state.active_scenario = scenario_key
 
-            progress = st.progress(0, text="Running DLP scan on raw payload...")
-            try:
-                ingest_result = ingest_payload(
-                    json.dumps(scenario["turns"]),
-                    session_name=session_name,
-                )
-                st.session_state.ingest_result = ingest_result
-                progress.progress(50, text="Replaying through agent pipeline...")
+            if is_voice:
+                # Voice sessions are already redacted — replay directly
+                session_name = scenario["_voice_session_id"]
+                progress = st.progress(0, text="Loading recorded session...")
+                try:
+                    progress.progress(50, text="Replaying through agent pipeline...")
+                    replay_result = replay_session(session_name)
+                    st.session_state.replay_result  = replay_result
+                    st.session_state.ingest_result  = {
+                        "phi_findings": 0, "finding_types": [],
+                        "note": "Pre-stripped during voice capture",
+                    }
+                    progress.progress(100, text="Done.")
+                except Exception as e:
+                    st.error(f"Replay failed: {e}")
+                    progress.empty()
+            else:
+                session_name = "demo-" + scenario_key.split("—")[0].strip().replace(" ", "-").lower()
+                progress = st.progress(0, text="Running DLP scan on raw payload...")
+                try:
+                    ingest_result = ingest_payload(
+                        json.dumps(scenario["turns"]),
+                        session_name=session_name,
+                    )
+                    st.session_state.ingest_result = ingest_result
+                    progress.progress(50, text="Replaying through agent pipeline...")
 
-                replay_result = replay_session(session_name)
-                st.session_state.replay_result = replay_result
-                progress.progress(100, text="Done.")
-            except Exception as e:
-                st.error(f"Replay failed: {e}")
-                progress.empty()
+                    replay_result = replay_session(session_name)
+                    st.session_state.replay_result = replay_result
+                    progress.progress(100, text="Done.")
+                except Exception as e:
+                    st.error(f"Replay failed: {e}")
+                    progress.empty()
             st.rerun()
 
     # ── Right column: results ──────────────────────────────────────
