@@ -1,0 +1,96 @@
+name: Trigger Veris Simulation (API)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to test (default: latest)"
+        required: false
+        default: "latest"
+
+env:
+  VERIS_ENV_ID: "env_28owwq0q0dng0633a5glk"
+  VERIS_SCENARIO_SET_ID: "scenset_mczzu6keewjb3r6aanlm0"
+
+jobs:
+  trigger-veris:
+    name: Trigger & Poll Veris Run
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install requests
+        run: pip install requests
+
+      - name: Trigger simulation run
+        id: trigger
+        env:
+          VERIS_API_KEY: ${{ secrets.VERIS_API_KEY }}
+          INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          python3 - <<'EOF'
+          import os, json, requests, sys
+
+          base    = "https://sandbox.api.veris.ai/v1"
+          headers = {"Authorization": f"Bearer {os.environ['VERIS_API_KEY']}", "Content-Type": "application/json"}
+
+          payload = {
+              "environment_id":  os.environ["VERIS_ENV_ID"],
+              "scenario_set_id": os.environ["VERIS_SCENARIO_SET_ID"],
+              "image_tag":       os.environ.get("INPUT_IMAGE_TAG", "latest"),
+          }
+
+          resp = requests.post(f"{base}/runs", headers=headers, json=payload, timeout=30)
+          resp.raise_for_status()
+          run_id = resp.json()["id"]
+
+          print(f"Run created: {run_id}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"run_id={run_id}\n")
+          EOF
+
+      - name: Poll until complete
+        env:
+          VERIS_API_KEY: ${{ secrets.VERIS_API_KEY }}
+          RUN_ID: ${{ steps.trigger.outputs.run_id }}
+        run: |
+          python3 - <<'EOF'
+          import os, json, requests, sys, time
+
+          base    = "https://sandbox.api.veris.ai/v1"
+          headers = {"Authorization": f"Bearer {os.environ['VERIS_API_KEY']}"}
+          run_id  = os.environ["RUN_ID"]
+
+          timeout, interval = 600, 15
+          deadline = time.time() + timeout
+
+          while time.time() < deadline:
+              r = requests.get(f"{base}/runs/{run_id}", headers=headers, timeout=30)
+              r.raise_for_status()
+              status = r.json().get("status", "")
+              print(f"  status: {status}", flush=True)
+              if status in ("completed", "failed", "cancelled"):
+                  break
+              time.sleep(interval)
+          else:
+              print("Timed out")
+              sys.exit(1)
+
+          if status != "completed":
+              print(f"Run ended: {status}")
+              sys.exit(1)
+
+          sims = requests.get(f"{base}/runs/{run_id}/simulations", headers=headers, timeout=30).json()
+          sim_list = sims.get("items", sims) if isinstance(sims, dict) else sims
+
+          sf = os.getenv("GITHUB_STEP_SUMMARY")
+          if sf:
+              lines = [
+                  "## Veris Simulation Results\n",
+                  "| Field | Value |", "|---|---|",
+                  f"| Run ID | `{run_id}` |",
+                  f"| Status | {status} |",
+                  f"| Simulations | {len(sim_list)} |",
+                  f"| View | [Open in Veris](https://sandbox.api.veris.ai/runs/{run_id}) |",
+              ]
+              open(sf, "a").write("\n".join(lines) + "\n")
+              print("\n".join(lines))
+          EOF
