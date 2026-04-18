@@ -39,7 +39,7 @@ PATTERNS = {
     "npi_number":    r"\bNPI[\s:#-]*\d{10}\b",
     "icd_code":      r"\b[A-Z]\d{2}\.?\d{0,2}\b",
     "dob":           r"\b(DOB|Date of Birth|born)[\s:]+\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
-    "insurance_id":  r"\b(insurance|policy|member)\s*(id|#|number)?[\s:#-]*[A-Z0-9]{6,15}\b",
+    "insurance_id":  r"\b(insurance|policy|member)\s*(id|#|number)?[\s:#-is]*[A-Z0-9]{6,15}\b",
     "medication":    r"\b\d+\s*mg\b",
 }
 
@@ -138,6 +138,13 @@ def claude_semantic_scan(text: str) -> list[dict]:
             messages=[{"role": "user", "content": CLAUDE_SCAN_PROMPT.format(text=text)}],
         )
         raw = response.content[0].text.strip()
+        # Strip markdown code fences if Claude wraps the response
+        if raw.startswith("```"):
+            raw = re.sub(r"^```[a-z]*\n?", "", raw)
+            raw = re.sub(r"\n?```$", "", raw)
+        raw = raw.strip()
+        if not raw:
+            return []
         result = json.loads(raw)
         return result.get("findings", [])
     except Exception as e:
@@ -169,6 +176,10 @@ def openai_second_opinion(text: str, findings: list[dict]) -> dict:
             max_tokens=256,
         )
         raw = response.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"^```[a-z]*\n?", "", raw)
+            raw = re.sub(r"\n?```$", "", raw)
+        raw = raw.strip()
         return json.loads(raw)
     except Exception as e:
         logger.error(f"OpenAI second opinion failed: {e}")
