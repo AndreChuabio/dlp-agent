@@ -24,7 +24,7 @@ jobs:
           pip install anthropic openai fastapi uvicorn python-dotenv requests pytest
 
       - name: Run pure-logic tests (no API)
-        run: pytest tests/ -v --tb=short -k "not full_pipeline"
+        run: PYTHONPATH=. pytest tests/ -v --tb=short -k "not full_pipeline"
 
   # ── Integration Tests (live API calls) ─────────────────────────────────
   integration-tests:
@@ -53,7 +53,7 @@ jobs:
           BASETEN_API_KEY: ${{ secrets.BASETEN_API_KEY }}
           BASETEN_MODEL: ${{ secrets.BASETEN_MODEL }}
           YOUCOM_API_KEY: ${{ secrets.YOUCOM_API_KEY }}
-        run: pytest tests/ -v --tb=short -k "full_pipeline"
+        run: PYTHONPATH=. pytest tests/ -v --tb=short -k "full_pipeline"
 
   # ── Voicerun Agent Smoke Test ───────────────────────────────────────────
   voicerun-tests:
