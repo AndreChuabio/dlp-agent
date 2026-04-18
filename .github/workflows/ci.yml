@@ -7,7 +7,7 @@ on:
 
 env:
   PYTHON_VERSION: "3.11"
-  VERIS_ENV_ID: "env_28owwq0q0dng0633a5glk"
+  VERIS_ENV_ID: ${{ vars.VERIS_ENV_ID }}
   # Get these from your Veris dashboard → Scenarios and Graders
   VERIS_SCENARIO_SET_ID: ${{ vars.VERIS_SCENARIO_SET_ID }}
   VERIS_GRADER_ID: ${{ vars.VERIS_GRADER_ID }}

@@ -9,8 +9,8 @@ on:
         default: "latest"
 
 env:
-  VERIS_ENV_ID: "env_28owwq0q0dng0633a5glk"
-  VERIS_SCENARIO_SET_ID: "scenset_mczzu6keewjb3r6aanlm0"
+  VERIS_ENV_ID: ${{ vars.VERIS_ENV_ID }}
+  VERIS_SCENARIO_SET_ID: ${{ vars.VERIS_SCENARIO_SET_ID }}
 
 jobs:
   trigger-veris:
