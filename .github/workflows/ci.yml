@@ -5,6 +5,10 @@ on:
 
 env:
   PYTHON_VERSION: "3.11"
+  VERIS_ENV_ID: "env_28owwq0q0dng0633a5glk"
+  # Get these from your Veris dashboard → Scenarios and Graders
+  VERIS_SCENARIO_SET_ID: ${{ vars.VERIS_SCENARIO_SET_ID }}
+  VERIS_GRADER_ID: ${{ vars.VERIS_GRADER_ID }}
 
 jobs:
   # ── Unit Tests (no API calls) ───────────────────────────────────────────
@@ -92,15 +96,12 @@ jobs:
           curl -sf http://localhost:8008/health && echo "Health check passed" || echo "Server not up yet (OK in CI)"
           kill $SERVER_PID 2>/dev/null || true
 
-  # ── Veris Adversarial Simulation ────────────────────────────────────────
+  # ── Veris Adversarial Simulation (real cloud run) ──────────────────────
   veris-simulation:
     name: Veris Adversarial Simulation
     runs-on: ubuntu-latest
     needs: [unit-tests, voicerun-tests]
-    # Run on pushes to main and on PRs from the same repo
-    if: >
-      github.ref == 'refs/heads/main' ||
-      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+    environment: veris-sandbox-ci
     steps:
       - uses: actions/checkout@v4
 
@@ -109,22 +110,89 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
-      - name: Install dependencies
-        run: pip install anthropic openai python-dotenv requests
+      - name: Install Veris CLI + deps
+        run: pip install "veris-cli>=2.22.2" requests
 
-      - name: Run Veris adversarial simulation
+      - name: Authenticate with Veris
         env:
-          PYTHONPATH: ${{ github.workspace }}
-          ANTHROPIC_API_KEY: placeholder
-          OPENAI_API_KEY: placeholder
-          BASETEN_API_KEY: placeholder
-        run: python tests/veris_simulation.py --github
+          VERIS_API_KEY: ${{ secrets.VERIS_API_KEY }}
+        run: veris login "$VERIS_API_KEY"
 
-      - name: Upload simulation report
+      - name: Build & push agent image
+        run: |
+          veris env push \
+            --env-id ${{ env.VERIS_ENV_ID }} \
+            --tag ${{ github.sha }}
+
+      - name: Run simulation & evaluation
+        run: |
+          veris run \
+            --scenario-set-id ${{ env.VERIS_SCENARIO_SET_ID }} \
+            --env-id ${{ env.VERIS_ENV_ID }} \
+            --grader-id ${{ env.VERIS_GRADER_ID }} \
+            --image-tag ${{ github.sha }} \
+            > veris-summary.md
+          cat veris-summary.md
+
+      - name: Fetch latest run details from Veris API
+        if: always()
+        env:
+          VERIS_API_KEY: ${{ secrets.VERIS_API_KEY }}
+        run: |
+          python - <<'EOF'
+          import os, json, requests, sys
+
+          headers = {"Authorization": f"Bearer {os.environ['VERIS_API_KEY']}"}
+          env_id  = os.environ["VERIS_ENV_ID"]
+
+          # Latest completed run for this environment
+          resp = requests.get(
+              "https://sandbox.api.veris.ai/v1/runs",
+              headers=headers,
+              params={"environment_id": env_id, "status": "completed", "limit": 1},
+              timeout=30,
+          )
+          resp.raise_for_status()
+          items = resp.json().get("items", [])
+          if not items:
+              print("No completed runs found yet")
+              sys.exit(0)
+
+          run     = items[0]
+          run_id  = run["id"]
+          tag     = run.get("image_tag", "N/A")
+          status  = run["status"]
+          print(f"Run ID : {run_id}")
+          print(f"Image  : {tag}")
+          print(f"Status : {status}")
+
+          # Fetch simulations in this run
+          sims = requests.get(
+              f"https://sandbox.api.veris.ai/v1/runs/{run_id}/simulations",
+              headers=headers, timeout=30,
+          ).json().get("items", [])
+          print(f"Simulations: {len(sims)}")
+
+          # Write to GitHub step summary
+          sf = os.getenv("GITHUB_STEP_SUMMARY")
+          if sf:
+              lines = [
+                  "\n## Veris Sandbox — Latest Run\n",
+                  f"| Field | Value |",
+                  f"|---|---|",
+                  f"| Run ID | `{run_id}` |",
+                  f"| Image tag | `{tag}` |",
+                  f"| Status | {status} |",
+                  f"| Simulations | {len(sims)} |",
+              ]
+              open(sf, "a").write("\n".join(lines) + "\n")
+          EOF
+
+      - name: Upload Veris summary
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: veris-simulation-report-${{ github.sha }}
-          path: "*.jsonl"
+          path: veris-summary.md
           if-no-files-found: ignore
           retention-days: 30
