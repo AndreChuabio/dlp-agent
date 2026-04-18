@@ -25,7 +25,7 @@ from primfunctions.completions import (
 )
 from datetime import date
 
-from agent.tools import (
+from tools import (
     scan_and_clean,
     extract_patient_info,
     lookup_patient,
@@ -133,6 +133,13 @@ async def handler(event: Event, context: Context):
 
     if isinstance(event, StartEvent):
         configure_provider(PROVIDER, voicerun_managed=True)
+
+        # Voicerun injects secrets via context.variables, not os.environ/.env
+        for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "BASETEN_API_KEY", "BASETEN_MODEL"):
+            val = context.variables.get(key)
+            if val:
+                os.environ[key] = val
+
         context.set_data("patient_info", {})
         context.set_data("is_returning", None)   # None = not yet checked
         context.set_data("db_patient", None)
