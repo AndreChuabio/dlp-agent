@@ -1,0 +1,12 @@
+# Agent Definition
+# This is the top-level configuration for your voice agent
+
+apiVersion: voicerun/v1
+name: dlp-health-agent
+description: "Voice agent project: dlp-health-agent"
+
+# TODO: Add dependencies - below is an example of a dependency
+# dependencies:
+#   - name: stock-evaluations
+#     version: 1.0.0
+#     repository: https://github.com/VoiceRun/stock-evaluations

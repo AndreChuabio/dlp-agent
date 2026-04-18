@@ -204,6 +204,78 @@ def log_scan(user_id: str, result: dict) -> None:
         f.write(json.dumps(entry) + "\n")
     logger.info(f"Audit log written for user {user_id} — severity: {entry['severity']}")
 
+# --- You.com insurance coverage search ---
+
+def search_insurance_coverage(insurance_id: str, reason: str = "") -> dict:
+    """
+    Search for insurance coverage info via You.com.
+    Only receives insurance_id — never patient name or diagnosis.
+    DLP enforces this upstream before this function is called.
+    """
+    api_key = os.getenv("YOUCOM_API_KEY")
+    if not api_key:
+        logger.warning("You.com API key not configured.")
+        return {"error": "Search unavailable", "results": []}
+
+    query = f"insurance coverage {insurance_id}"
+    if reason:
+        query += f" {reason} coverage benefits"
+
+    try:
+        resp = requests.get(
+            "https://api.ydc-index.io/search",
+            params={"query": query, "num_web_results": 3},
+            headers={"X-API-Key": api_key},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        hits = data.get("hits", [])
+        results = [{"title": h.get("title", ""), "snippet": h.get("description", "")} for h in hits[:3]]
+        logger.info(f"You.com search returned {len(results)} results for insurance_id: {insurance_id[:4]}****")
+        return {"results": results, "query": query}
+    except Exception as e:
+        logger.error(f"You.com search failed: {e}")
+        return {"error": str(e), "results": []}
+
+
+# --- Patient info extractor ---
+
+EXTRACTION_PROMPT = """You are a structured data extraction assistant for a medical onboarding agent.
+Given a voice conversation transcript, extract any patient information mentioned so far.
+Respond with ONLY valid JSON — no markdown, no explanation.
+
+Format: {{"patient_name": "<name or null>", "insurance_id": "<id or null>", "reason": "<reason or null>", "dob": "<YYYY-MM-DD or null>", "phone": "<phone or null>"}}
+
+Rules:
+- Only include fields the patient has explicitly stated.
+- Use null for fields not yet mentioned.
+- Extract the most recent value if the patient corrected themselves.
+
+Transcript:
+{transcript}"""
+
+def extract_patient_info(messages: list[dict]) -> dict:
+    """Extract structured patient fields from conversation history using Claude."""
+    transcript = "\n".join(
+        f"{'Patient' if m['role'] == 'user' else 'Agent'}: {m['content']}"
+        for m in messages[-8:]
+        if isinstance(m.get("content"), str)
+    )
+    if not transcript.strip():
+        return {}
+    try:
+        response = anthropic_client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=200,
+            messages=[{"role": "user", "content": EXTRACTION_PROMPT.format(transcript=transcript)}],
+        )
+        return json.loads(response.content[0].text.strip())
+    except Exception as e:
+        logger.error(f"Patient info extraction failed: {e}")
+        return {}
+
+
 # --- Full pipeline ---
 
 def scan_and_clean(text: str, user_id: str = "anonymous") -> dict:

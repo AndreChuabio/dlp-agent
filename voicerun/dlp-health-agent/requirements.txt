@@ -1,0 +1,5 @@
+primfunctions>=0.1.0
+anthropic
+openai
+python-dotenv
+requests
