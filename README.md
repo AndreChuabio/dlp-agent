@@ -1,32 +1,35 @@
-# DLP Agent
+# MediGuard AI
 
-HIPAA-compliant AI guardrail layer for healthcare and regulated industries.
-
-Intercepts, redacts, and logs sensitive patient data before it reaches any AI model.
+HIPAA-compliant patient onboarding agent. Patients call in, speak naturally, and get onboarded — no forms, no paperwork. Every message is scanned and redacted before it reaches any AI model.
 
 ---
 
 ## The Problem
 
-Healthcare companies, law firms, and banks cannot let employees use AI tools. One paste of patient data into ChatGPT is a HIPAA violation and a $1M fine. This agent is the privacy layer that unblocks them.
+Healthcare companies cannot let employees or patients use AI tools. One message containing patient data is a HIPAA violation and a $1M fine. And traditional onboarding means patients filling out long forms before their first visit.
+
+MediGuard AI fixes both problems.
+
+---
+
+## What It Does
+
+A patient calls in. The agent collects their info conversationally — name, reason for visit, insurance ID. It searches their coverage in real time via You.com. All of this happens without a single form, and without any PHI ever reaching an AI model unprotected.
 
 ---
 
 ## How It Works
 
 ```
-Patient speaks
+Patient speaks (Voicerun)
       |
       v
-Voicerun (speech-to-text)
-      |
-      v
-Regex scan — SSN, MRN, ICD codes, DOB, API keys
+Regex scan — SSN, MRN, ICD codes, DOB, insurance IDs
       |
       v
 Baseten triage — fast binary flag: sensitive or not?
       |
-    NO  → return safe, skip Claude
+    NO  → skip Claude, return safe
     YES ↓
       |
       v
@@ -38,10 +41,17 @@ Claude semantic scan — contextual PHI: diagnoses, medications, treatment plans
 OpenAI second opinion — cross-validates high severity findings
       |
       v
-Redact + Audit log
+Redact + Audit log (HIPAA-compliant trail)
       |
       v
-Clean text → AI assistant responds
+Claude extracts structured fields from conversation
+(patient name, insurance ID, reason, DOB)
+      |
+      v
+You.com searches insurance coverage using ID only — never raw PHI
+      |
+      v
+Agent responds: "You're covered for that visit, copay is $30"
 ```
 
 ---
@@ -73,7 +83,8 @@ uvicorn api.server:app --reload
 ANTHROPIC_API_KEY=
 OPENAI_API_KEY=
 BASETEN_API_KEY=
-BASETEN_MODEL_ID=     # swap to test different triage models
+BASETEN_MODEL=deepseek-ai/DeepSeek-V3.1   # swap to test different triage models
+YOUCOM_API_KEY=
 VOICERUN_API_KEY=
 ```
 
@@ -83,7 +94,7 @@ VOICERUN_API_KEY=
 
 | Layer | Catches |
 |---|---|
-| Regex | SSN, credit card, email, phone, API keys, MRN, NPI, ICD codes, DOB, insurance IDs |
+| Regex | SSN, credit card, email, phone, MRN, NPI, ICD codes, DOB, insurance IDs, medication dosages |
 | Baseten | Binary triage — routes to deep scan only when needed |
 | Claude | Contextual PHI — diagnoses, medications, mental health info, treatment plans |
 | OpenAI | Cross-validates high severity Claude findings |
@@ -94,14 +105,17 @@ VOICERUN_API_KEY=
 
 ```
 dlp-agent/
-├── main.py              — CLI entry point
+├── main.py                        — CLI entry point
 ├── agent/
-│   ├── tools.py         — full detection pipeline
-│   ├── orchestrator.py  — agent loop
-│   └── prompts.py       — system prompts
-├── api/server.py        — FastAPI POST /scan
-├── ui/app.py            — Streamlit demo UI
-└── tests/test_agent.py  — smoke tests
+│   ├── tools.py                   — full DLP pipeline + You.com search + patient extractor
+│   ├── orchestrator.py            — agent loop
+│   └── prompts.py                 — system prompts
+├── api/server.py                  — FastAPI POST /scan
+├── ui/app.py                      — Streamlit demo UI
+├── voicerun/
+│   └── dlp-health-agent/
+│       └── handler.py             — Voicerun onboarding agent with DLP middleware
+└── tests/test_agent.py            — smoke tests
 ```
 
 ---
