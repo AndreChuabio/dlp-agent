@@ -18,7 +18,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install python-dotenv
+          pip install python-dotenv requests anthropic openai
 
       - name: Run Veris simulation
         run: python tests/veris_simulation.py --github
