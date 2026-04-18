@@ -9,8 +9,13 @@
       "Bash(pip install *)",
       "Bash(brew install *)",
       "Bash(vr *)",
-      "Bash(python *)",
-      "Bash(veris *)"
+      "Bash(git pull:*)",
+      "Bash(git stash:*)",
+      "Bash(gh api *)",
+      "Bash(python:*)"
     ]
-  }
+  },
+  "enabledMcpjsonServers": [
+    "mediguard-dlp"
+  ]
 }

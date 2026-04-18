@@ -28,19 +28,64 @@ openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # --- Patterns ---
 
 PATTERNS = {
-    # Standard PII
+    # ── Standard PII ──────────────────────────────────────────────────────────
     "SSN":           r"\b\d{3}-\d{2}-\d{4}\b",
     "credit_card":   r"\b(?:\d{4}[- ]){3}\d{4}\b",
     "email":         r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",
     "phone":         r"\b\(?([0-9]{3})\)?[-.\s]?([0-9]{3})[-.\s]?([0-9]{4})\b",
     "api_key":       r"\b(sk-|pk_|AIza)[A-Za-z0-9_\-]{20,}\b",
-    # HIPAA / PHI
-    "patient_name":  r"\b(patient|pt\.?)\s+[A-Z][a-z]+\s+[A-Z][a-z]+\b",
+
+    # ── HIPAA Safe Harbor — 18 identifiers ────────────────────────────────────
+    # 1. Names
+    # Case-sensitive (see _CASE_SENSITIVE_PATTERNS) — requires Capitalized words so
+    # "I am going to the store" does NOT match, but "I am Alice Johnson" does.
+    # Allows optional single-letter middle initial: "David K Kim"
+    "patient_name": (
+        r"(?:name\s+is|I(?:'m|\s+am)|patient|pt\.?)\s+"
+        r"[A-Z][a-z]{1,}(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z]{1,})+"
+    ),
+    # 2. Geographic subdivisions smaller than state
+    # Catches "123 Main St", "42 Elm Street", "1600 Pennsylvania Ave"
+    "street_address": (
+        r"\b\d{1,5}\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*"
+        r"\s+(?:St(?:reet)?|Ave(?:nue)?|Blvd|Rd|Road|Dr(?:ive)?|Ln|Lane|Ct|Court|Pl|Place|Way)\b"
+    ),
+    # 3. Dates (except year) — tied to an individual
+    # Catches numeric dates (03/22/1975) AND text dates (March 22nd, 1975)
+    "dob": (
+        r"\b(?:DOB|Date\s+of\s+Birth|born|birthday|birth\s+date)"
+        r"(?:\s+is)?\s*:?\s*"
+        r"(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}"
+        r"|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?"
+        r"|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+        r"\.?\s+\d{1,2}(?:st|nd|rd|th)?[,\s]+\d{4})"
+    ),
+    # 4/5. Phone & fax numbers (same format)
+    # (phone already defined above under Standard PII)
+    # 6. Email — see above
+    # 7. SSN — see above
+    # 8. Medical record numbers
     "medical_record": r"\bMRN[\s:#-]*\d{5,10}\b",
+    # 9. Health plan beneficiary / insurance IDs
+    "insurance_id":  r"\b(insurance|policy|member)\s*(id|#|number)?[\s:#-]*[A-Z0-9]{6,15}\b",
+    # 10. Account numbers — catch generic "account #" references
+    "account_number": r"\b(?:account|acct)[\s:#-]*\d{6,20}\b",
+    # 11. Certificate/license numbers
+    "license_number": r"\b(?:license|cert(?:ificate)?|lic)[\s:#-]*[A-Z0-9]{5,20}\b",
+    # 12. Vehicle identifiers (VIN = 17 alphanumeric, license plates vary)
+    "vehicle_id": r"\bVIN[\s:#-]*[A-HJ-NPR-Z0-9]{17}\b",
+    # 13. Device identifiers (serial numbers, device IDs in session metadata)
+    "device_id": r"\b(?:device[\s_-]?id|serial[\s_-]?(?:number|no\.?)|IMEI)[\s:#-]*[A-Z0-9]{8,20}\b",
+    # 14. URLs
+    "url": r"\bhttps?://[^\s\]>\"')]{4,}\b",
+    # 15. IP addresses (common in session logs — exact IP is PHI when tied to a patient)
+    "ip_address": r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
+    # 16. Biometric identifiers — can't regex audio/images; flagged at semantic layer
+    # 17. Full-face photos — same; handled semantically
+    # NPI, ICD codes
     "npi_number":    r"\bNPI[\s:#-]*\d{10}\b",
     "icd_code":      r"\b[A-Z]\d{2}\.?\d{0,2}\b",
-    "dob":           r"\b(DOB|Date of Birth|born)[\s:]+\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
-    "insurance_id":  r"\b(insurance|policy|member)\s*(id|#|number)?[\s:#-is]*[A-Z0-9]{6,15}\b",
+    # Medications (dosage mentions)
     "medication":    r"\b\d+\s*mg\b",
 }
 
@@ -59,11 +104,18 @@ def transcribe_audio(audio_source) -> str:
 
 # --- Step 2: Regex scan ---
 
+# Patterns that need case-sensitive matching to avoid false positives.
+# "patient_name" requires capital letters so "I am going to the store"
+# doesn't match, but "I am Alice Johnson" does.
+_CASE_SENSITIVE_PATTERNS = {"patient_name"}
+
+
 def regex_scan(text: str) -> list[dict]:
     """Fast structured PII/PHI detection using regex patterns."""
     findings = []
     for label, pattern in PATTERNS.items():
-        for match in re.finditer(pattern, text, re.IGNORECASE):
+        flags = 0 if label in _CASE_SENSITIVE_PATTERNS else re.IGNORECASE
+        for match in re.finditer(pattern, text, flags):
             findings.append({
                 "type": label,
                 "value": match.group(),
