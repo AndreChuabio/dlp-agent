@@ -1,82 +1,101 @@
-# DLP Agent — VS Code Copilot Instructions
+# MediGuard AI — VS Code Copilot Instructions
 
 ## What This Project Is
 
-Enterprise Data Loss Prevention (DLP) agent built for the Enterprise Agent Jam NYC hackathon.
-Target users: healthcare companies, law firms, banks — regulated industries blocked from using AI tools due to data leakage risk.
+HIPAA-compliant AI middleware for healthtech startups. Intercepts patient messages, scans for PHI, redacts, logs, then passes clean text to any LLM. Patients onboard conversationally — no forms.
 
-Core pitch: "Healthcare companies, law firms, banks — they can't let employees use AI tools. One paste of patient data into ChatGPT is a HIPAA violation and a $1M fine. We built the guardrail layer that fixes that."
+Built at Enterprise Agent Jam NYC.
 
-Nikki (teammate) lived this problem — her team couldn't use Claude until they had privacy controls. She speaks from personal experience in the demo.
+---
 
-## Detection Pipeline
+## Pitch
+
+"Healthtech startups want to use AI. They can't afford a private LLM. One PHI leak and they're done. Drop MediGuard in front of any model — you're compliant. Pay per use, no infrastructure."
+
+Nikki (teammate) lived this — her company couldn't use Claude until they had privacy controls.
+
+---
+
+## Full Pipeline
 
 ```
-Patient speaks
+Patient speaks/types
       |
       v
-Voicerun (speech-to-text)
+Voicerun (speech-to-text, optional)
       |
       v
-Raw transcript text
-      |
-      v
-1. Regex scan        — SSN, MRN, ICD codes, DOB, API keys (instant, free)
-      |
-      v
-2. Baseten triage    — fast open-source model: "is this sensitive?" YES/NO
-      |
-    NO  → skip Claude, return safe immediately
-    YES ↓
-      |
-      v
-3. Claude semantic   — contextual PHI: diagnoses, medications, treatment plans
-      |
-    severity=high ↓
-      |
-      v
-4. OpenAI second opinion — cross-validates high severity findings only
-      |
-      v
-5. Redact            — replace findings with [REDACTED:TYPE] tokens
-      |
-      v
-6. Audit log         — append to dlp_audit_log.jsonl (HIPAA audit trail)
-      |
-      v
-Clean text → AI assistant responds
+1. Regex scan        — SSN, MRN, ICD codes, DOB, insurance IDs, medication dosages
+2. Baseten triage    — DeepSeek V3.1 binary flag (skip Claude if safe)
+3. Claude semantic   — contextual PHI: diagnoses, medications, mental health
+4. OpenAI validation — cross-validates high severity findings
+5. Redact            — [REDACTED:TYPE] tokens replace findings
+6. Audit log         — append to dlp_audit_log.jsonl
+7. Patient extractor — Claude pulls structured fields from conversation
+8. You.com search    — insurance coverage lookup using ID only
+9. Agent response    — Claude responds with coverage info
 ```
+
+---
 
 ## Repo Structure
 
 ```
 dlp-agent/
-├── main.py                  — CLI entry point
+├── main.py                        — CLI entry point
 ├── agent/
-│   ├── tools.py             — full pipeline: all 6 steps above
-│   ├── orchestrator.py      — thin loop: text/audio in → result dict out
-│   └── prompts.py           — Claude + OpenAI prompt strings
-├── api/
-│   └── server.py            — FastAPI POST /scan
-├── ui/
-│   └── app.py               — Streamlit demo UI
-├── tests/
-│   └── test_agent.py        — smoke tests
-├── .env                     — API keys (never commit)
-├── .env.example             — template
-└── requirements.txt
+│   ├── tools.py                   — all pipeline functions
+│   ├── orchestrator.py            — thin agent loop
+│   └── prompts.py                 — system prompts
+├── api/server.py                  — FastAPI: POST /chat, POST /scan, GET /health
+├── ui/app.py                      — Streamlit dashboard (3 tabs)
+├── voicerun/dlp-health-agent/
+│   └── handler.py                 — Voicerun voice agent handler
+├── .veris/
+│   ├── Dockerfile.sandbox         — Veris container config
+│   └── veris.yaml                 — Veris simulation config
+└── tests/test_agent.py            — smoke tests
 ```
+
+---
+
+## Key Functions in agent/tools.py
+
+| Function | Does |
+|---|---|
+| `regex_scan(text)` | Fast structured PHI detection, returns list of findings with offsets |
+| `baseten_triage(text)` | Calls DeepSeek V3.1 via Baseten — returns bool (escalate or not) |
+| `claude_semantic_scan(text)` | Deep contextual PHI via Claude — catches what regex misses |
+| `openai_second_opinion(text, findings)` | Validates high severity findings via GPT-4o |
+| `redact_text(text, findings)` | Replaces regex findings with [REDACTED:TYPE] in-place |
+| `log_scan(user_id, result)` | Appends to dlp_audit_log.jsonl |
+| `extract_patient_info(messages)` | Claude extracts structured fields from conversation history |
+| `search_insurance_coverage(insurance_id, reason)` | You.com search — never sends raw PHI |
+| `scan_and_clean(text, user_id)` | Full pipeline — call this for everything |
+
+---
+
+## API Endpoints
+
+```
+POST /chat      — Veris-compatible conversational endpoint, runs full pipeline
+POST /scan      — Raw DLP scan, returns findings + redacted text
+GET  /health    — Health check
+```
+
+---
 
 ## Sponsor Integrations
 
-| Sponsor | Role | Points | Notes |
-|---|---|---|---|
-| Veris AI | Adversarial sandbox — run before demo, screenshot detection rate | 4 pts | Sign up at console.veris.ai — they whitelist and email back |
-| Baseten | Triage gate in pipeline — binary flag before Claude | 2 pts | Set BASETEN_MODEL_ID in .env — swap freely when testing |
-| OpenAI | Second opinion on high severity findings only | 2 pts | Promo code PJTJR5VEGMNDQR9J at platform.openai.com |
-| Voicerun | Speech-to-text input layer | 2 pts | pip install voicerun-cli && vr setup |
+| Sponsor | Points | Role |
+|---|---|---|
+| Veris AI | 4 pts | Adversarial sandbox — run before demo |
+| Baseten | 2 pts | Triage gate — BASETEN_MODEL in .env to swap models |
+| OpenAI | 2 pts | Whisper (voice) + GPT-4o (validation) |
+| You.com | 2 pts | Insurance coverage search |
+| Voicerun | 2 pts | Voice agent layer |
 
-**Baseten model swap:** change `BASETEN_MODEL_ID` in `.env`, restart — zero code changes needed.
+---
 
 ## Environment Variables
 
@@ -84,89 +103,37 @@ dlp-agent/
 ANTHROPIC_API_KEY=
 OPENAI_API_KEY=
 BASETEN_API_KEY=
-BASETEN_MODEL_ID=        # swap freely when testing models against Veris sandbox
+BASETEN_MODEL=deepseek-ai/DeepSeek-V3.1
+YOUCOM_API_KEY=
 VOICERUN_API_KEY=
 ```
 
-Never commit `.env`. It is in `.gitignore`.
-
-## What We Detect
-
-**Regex (structured):**
-- SSN, credit card, email, phone, API keys
-- MRN (medical record number), NPI, ICD codes, DOB
-- Insurance IDs, medication dosages
-
-**Claude semantic (contextual):**
-- Diagnoses, conditions, symptoms — PHI even without a patient name
-- Medications, dosages, treatment plans
-- Mental health info (extra protected under 42 CFR Part 2)
-- Lab results, imaging, procedures
-- Insurance and billing context
-
-**OpenAI:** validates Claude's high severity flags — adds cross-model credibility
-
-## Scoring
-
-| Category | Points | Our play |
-|---|---|---|
-| Sponsor Solutions | 10 pts (2 each, 4 Veris) | All 4 sponsors integrated |
-| Usefulness & Impact | 5 pts | Real HIPAA problem Nikki lived |
-| Technical Execution | 5 pts | Multi-model pipeline, live redaction |
-| Creativity & Innovation | 5 pts | Voice → scan → redact loop |
-| Presentation | 5 pts | Nikki tells her story, live demo |
-
-## Build Order
-
-1. `agent/tools.py` — core pipeline (already built)
-2. `agent/prompts.py` — prompt strings (already built)
-3. `agent/orchestrator.py` — thin loop (already built)
-4. `main.py` — CLI (already built)
-5. `api/server.py` — FastAPI wrapper (already built)
-6. `ui/app.py` — Streamlit UI (already built)
-7. `tests/test_agent.py` — smoke tests (already built)
-
-## Time Plan
-
-| Time | Goal |
-|---|---|
-| Now | Fill .env, pip install, run CLI test |
-| 12:30 PM | All sponsors integrated and tested |
-| 2:30 PM | Agent handles 3+ realistic clinical inputs |
-| 3:30 PM | Run Veris adversarial sandbox, screenshot report |
-| 4:30 PM | Demo rehearsal — Nikki leads pitch |
-| 5:00 PM | Code freeze |
-| 5:30 PM | Demo |
-
-## Demo Flow
-
-1. Nikki tells her story: "My team couldn't use Claude until we had this."
-2. Patient speaks: "Hi I'm John Smith, MRN 123456, DOB 04/12/1985, I'm on 50mg sertraline for F32.1..."
-3. Voicerun transcribes
-4. Agent intercepts — regex + Baseten + Claude fire
-5. Show redacted output side by side with original
-6. Audit log updates live on screen
-7. Show Veris report: "X% detection rate across 50 adversarial attempts"
+---
 
 ## Coding Standards
 
 - Python, PEP8, docstrings on all functions
 - No hardcoded secrets — always `os.getenv()`
-- Logging and exceptions over silent failures
 - Expand existing files — do not create new ones
 - Keep `requirements.txt` updated
+- Logging and exceptions over silent failures
+
+---
+
+## Demo Flow
+
+1. Nikki tells her story: "My team couldn't use Claude until we had this."
+2. Open dashboard — Agent Chat tab
+3. Paste: "Hi, my name is John Smith, DOB 04/12/1985, MRN 123456. I've been dealing with major depression and my doctor has me on 50mg sertraline. My insurance ID is BCX884521 and I need help finding a specialist."
+4. Show: 12 findings redacted, DLP expander, agent response, sidebar patient info
+5. Show: Live HIPAA audit log updating
+6. Show: Veris detection rate report
+
+---
 
 ## Scope Cut Priority
 
 1. Cut polish
-2. Cut secondary features
-3. Cut Streamlit UI (CLI is fine for demo)
-4. Never cut: regex + Claude semantic + audit log + happy path demo flow
-
-## Do Not
-
-- Do not hardcode API keys
-- Do not create new files unless absolutely necessary
-- Do not add features beyond demo scope
-- Do not leave TODOs or half-finished implementations
-- Do not commit `.env`, credentials, or instruction files
+2. Cut Voicerun phone integration
+3. Cut secondary features
+4. Never cut: DLP pipeline, chat UI, audit log, happy path demo
