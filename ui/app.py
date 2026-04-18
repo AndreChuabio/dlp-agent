@@ -252,6 +252,40 @@ def github_add_pattern(pattern_name: str, regex: str, description: str, example:
                     "sha": sd["sha"], "branch": branch,
                 })
 
+    # 4b. Always pin the correct workflow file so feature branches run reliably
+    _correct_workflow = (
+        "name: DLP Veris Simulation\n\n"
+        "on:\n  workflow_dispatch:\n\n"
+        "jobs:\n  veris-simulation:\n    runs-on: ubuntu-latest\n"
+        "    name: Veris Adversarial Detection Test\n\n    steps:\n"
+        "      - uses: actions/checkout@v4\n\n"
+        "      - name: Set up Python\n        uses: actions/setup-python@v5\n"
+        "        with:\n          python-version: \"3.11\"\n\n"
+        "      - name: Install dependencies\n        run: pip install -r requirements.txt\n\n"
+        "      - name: Run Veris simulation\n"
+        "        run: python tests/veris_simulation.py --github\n"
+        "        env:\n"
+        "          PYTHONPATH: ${{ github.workspace }}\n"
+        "          ANTHROPIC_API_KEY: placeholder\n"
+        "          OPENAI_API_KEY: placeholder\n"
+        "          BASETEN_API_KEY: placeholder\n\n"
+        "      - name: Upload simulation report\n        if: always()\n"
+        "        uses: actions/upload-artifact@v4\n        with:\n"
+        "          name: veris-simulation-report\n          path: \"*.jsonl\"\n"
+        "          if-no-files-found: ignore\n"
+    )
+    wf_r = req.get(f"{api}/contents/.github/workflows/dlp-simulation.yml",
+                   headers=headers, timeout=10, params={"ref": branch})
+    wf_payload = {
+        "message": "ci: pin requirements.txt install in simulation workflow",
+        "content": base64.b64encode(_correct_workflow.encode()).decode(),
+        "branch":  branch,
+    }
+    if wf_r.status_code == 200:
+        wf_payload["sha"] = wf_r.json()["sha"]
+    req.put(f"{api}/contents/.github/workflows/dlp-simulation.yml",
+            headers=headers, timeout=10, json=wf_payload)
+
     # 5. Open PR
     r = req.post(f"{api}/pulls", headers=headers, timeout=10,
                  json={
