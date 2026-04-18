@@ -1115,39 +1115,52 @@ with coverage_tab:
                     st.session_state.pop("veris_report", None)
                     st.rerun()
 
-            # ── Veris results panel ──────────────────────────────
             run_id = st.session_state.get("veris_run_id")
             if run_id:
-                st.markdown(f"**Active Veris run:** `{run_id}`")
-                if st.button("🔄 Check Results", key="check_veris", use_container_width=False):
-                    with st.spinner("Fetching run status from Veris..."):
-                        report = veris_fetch_run_report(run_id)
-                    st.session_state.veris_report = report
+                st.markdown(f"**Active Veris run:** `{run_id}` — scroll down to Check Results.")
 
-            report = st.session_state.get("veris_report")
-            if report:
-                if "error" in report:
-                    st.error(report["error"])
-                else:
-                    status = report["status"]
-                    color  = {"completed": "green", "failed": "red", "running": "orange", "provisioning": "blue"}.get(status, "gray")
-                    st.markdown(f"**Status:** :{color}[**{status}**]")
-                    st.markdown(f"{report['completed']}/{report['total']} simulations complete · {report['failed']} failed")
-                    if report.get("duration"):
-                        st.caption(f"Duration: {report['duration']:.0f}s")
-                    if status != "completed":
-                        st.info("Run still in progress — hit Check Results again to refresh.")
-                    elif report.get("simulations"):
-                        sims = report["simulations"]
-                        st.markdown(f"#### Veris Simulation Results — {len(sims)} scenarios")
-                        passed = sum(1 for s in sims if not s.get("failed"))
-                        st.markdown(f"**{passed}/{len(sims)} passed**")
-                        for sim in sims[:10]:
-                            sid    = sim.get("id", "")[:20]
-                            result_val = sim.get("result") or sim.get("status", "")
-                            st.markdown(f"- `{sid}` — {result_val}")
-                        if len(sims) > 10:
-                            st.caption(f"…and {len(sims) - 10} more")
+
+# ============================================================
+# Veris Run Results
+# ============================================================
+st.markdown("---")
+st.markdown("### Veris Simulation Results")
+st.caption("Check the status of any Veris run by ID.")
+
+_default_run_id = st.session_state.get("veris_run_id", "")
+_run_id_input = st.text_input("Veris Run ID", value=_default_run_id, placeholder="run_abc123...", key="veris_run_id_input")
+
+if st.button("🔄 Check Results", key="check_veris_standalone"):
+    if not _run_id_input:
+        st.warning("Enter a run ID above.")
+    else:
+        with st.spinner("Fetching from Veris..."):
+            _report = veris_fetch_run_report(_run_id_input)
+        st.session_state.veris_report = _report
+
+_report = st.session_state.get("veris_report")
+if _report:
+    if "error" in _report:
+        st.error(_report["error"])
+    else:
+        _status = _report["status"]
+        _color  = {"completed": "green", "failed": "red", "running": "orange", "provisioning": "blue"}.get(_status, "gray")
+        st.markdown(f"**Status:** :{_color}[**{_status}**]")
+        st.markdown(f"{_report['completed']}/{_report['total']} simulations complete · {_report['failed']} failed")
+        if _report.get("duration"):
+            st.caption(f"Duration: {_report['duration']:.0f}s")
+        if _status != "completed":
+            st.info("Run still in progress — hit Check Results again to refresh.")
+        elif _report.get("simulations"):
+            _sims = _report["simulations"]
+            _passed = sum(1 for s in _sims if not s.get("failed"))
+            st.markdown(f"**{_passed}/{len(_sims)} passed**")
+            for _sim in _sims[:10]:
+                _sid = _sim.get("id", "")[:20]
+                _res = _sim.get("result") or _sim.get("status", "")
+                st.markdown(f"- `{_sid}` — {_res}")
+            if len(_sims) > 10:
+                st.caption(f"…and {len(_sims) - 10} more")
 
 
 # ============================================================
