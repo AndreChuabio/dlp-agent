@@ -24,6 +24,10 @@ jobs:
           pip install anthropic openai fastapi uvicorn python-dotenv requests pytest
 
       - name: Run pure-logic tests (no API)
+        env:
+          ANTHROPIC_API_KEY: placeholder
+          OPENAI_API_KEY: placeholder
+          BASETEN_API_KEY: placeholder
         run: PYTHONPATH=. pytest tests/ -v --tb=short -k "not full_pipeline"
 
   # ── Integration Tests (live API calls) ─────────────────────────────────
