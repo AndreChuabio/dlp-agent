@@ -313,20 +313,26 @@ def github_add_pattern(pattern_name: str, regex: str, description: str, example:
     }
 
 
-def github_trigger_simulation(branch: str) -> dict:
-    """Manually dispatch the Veris simulation workflow on a branch."""
+def veris_trigger_run() -> dict:
+    """Trigger a real Veris sandbox simulation run via the Veris REST API."""
     import requests as req
-    headers = _gh_headers()
-    if not headers:
-        return {"error": "GITHUB_TOKEN not set"}
+    api_key = os.getenv("VERIS_API_KEY", "").strip()
+    env_id  = os.getenv("VERIS_ENV_ID", "env_28owwq0q0dng0633a5glk").strip()
+    set_id  = os.getenv("VERIS_SCENARIO_SET_ID", "scenset_mczzu6keewjb3r6aanlm0").strip()
+    if not api_key:
+        return {"error": "VERIS_API_KEY not set"}
     r = req.post(
-        f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/dlp-simulation.yml/dispatches",
-        headers=headers, timeout=10,
-        json={"ref": branch},
+        "https://sandbox.api.veris.ai/v1/runs",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={"environment_id": env_id, "scenario_set_id": set_id, "image_tag": "latest"},
+        timeout=15,
     )
-    if r.status_code == 204:
-        return {"ok": True, "runs_url": f"https://github.com/{GITHUB_REPO}/actions"}
-    return {"error": f"Trigger failed ({r.status_code}): {r.text[:200]}"}
+    if r.status_code in (200, 201):
+        run = r.json()
+        return {"ok": True, "run_id": run["id"], "total": run.get("total_simulations", 0)}
+    if r.status_code == 409:
+        return {"error": "A simulation is already running — wait for it to finish then retry."}
+    return {"error": f"Veris API error ({r.status_code}): {r.text[:200]}"}
 
 
 def fetch_latest_sim_run(force: bool = False) -> dict:
@@ -1061,16 +1067,17 @@ with coverage_tab:
                 )
             with col_b:
                 if st.button("▶ Run Veris Simulation", type="primary", key="trigger_sim", use_container_width=True):
-                    with st.spinner("Triggering simulation..."):
-                        trig = github_trigger_simulation(result["branch"])
+                    with st.spinner("Triggering Veris simulation..."):
+                        trig = veris_trigger_run()
                     if "error" in trig:
                         st.error(trig["error"])
                     else:
                         import time as _t
                         st.session_state.sim_triggered_at = _t.time()
-                        st.session_state.sim_run_cache = None   # force fresh fetch on next render
-                        st.success("Simulation triggered! Scroll up to watch the run status.")
-                        st.markdown(f"[View all runs →]({trig['runs_url']})")
+                        st.session_state.veris_run_id = trig["run_id"]
+                        st.session_state.sim_run_cache = None
+                        st.success(f"Veris run started — {trig['total']} simulations queued.")
+                        st.markdown(f"Run ID: `{trig['run_id']}`")
             with col_c:
                 if st.button("Clear", key="clear_pr", use_container_width=True):
                     st.session_state.pr_result = None
