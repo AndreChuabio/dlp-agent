@@ -6,3 +6,5 @@ streamlit
 python-dotenv
 requests
 mcp
+slowapi
+psycopg2-binary

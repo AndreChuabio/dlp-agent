@@ -9,7 +9,7 @@ import logging
 import os
 import hashlib
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 
 import anthropic
 from openai import OpenAI
@@ -18,6 +18,48 @@ from dotenv import load_dotenv
 load_dotenv()
 
 LOG_FILE = "dlp_audit_log.jsonl"
+
+# ---------------------------------------------------------------------------
+# Audit log backend — Postgres when DATABASE_URL is set, JSONL fallback
+# ---------------------------------------------------------------------------
+
+_db_conn = None
+
+
+def _get_db_conn():
+    """Lazy singleton Postgres connection. Returns None if DATABASE_URL unset."""
+    global _db_conn
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        return None
+    if _db_conn is None or _db_conn.closed:
+        try:
+            import psycopg2
+            _db_conn = psycopg2.connect(database_url, sslmode="require")
+            _db_conn.autocommit = True
+            _ensure_audit_table(_db_conn)
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Postgres connection failed, falling back to JSONL: {e}")
+            return None
+    return _db_conn
+
+
+def _ensure_audit_table(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS dlp_audit_log (
+                id               SERIAL PRIMARY KEY,
+                timestamp        TIMESTAMPTZ NOT NULL,
+                user_id          TEXT,
+                safe_to_send     BOOLEAN,
+                findings_count   INTEGER,
+                finding_types    JSONB,
+                severity         TEXT,
+                regulation       JSONB,
+                baseten_escalated BOOLEAN,
+                openai_confirmed  JSONB
+            )
+        """)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -263,26 +305,66 @@ def redact_text(text: str, regex_findings: list[dict]) -> str:
         text = text[:finding["start"]] + replacement + text[finding["end"]:]
     return text
 
+
+def redact_semantic_findings(text: str, semantic_findings: list[dict]) -> str:
+    """Replace Claude semantic finding excerpts with [REDACTED:TYPE] tokens.
+
+    Uses exact string replacement — if the excerpt was already caught by regex
+    and replaced with a token, the replace is a no-op and is skipped safely.
+    """
+    for finding in semantic_findings:
+        excerpt = finding.get("excerpt", "").strip()
+        if not excerpt:
+            continue
+        label = finding.get("type", "PHI").upper().replace(" ", "_")
+        text = text.replace(excerpt, f"[REDACTED:{label}]")
+    return text
+
 # --- Step 7: Audit logger ---
 
 def log_scan(user_id: str, result: dict) -> None:
-    """Append scan result to HIPAA audit log (JSONL)."""
+    """Append scan result to HIPAA audit log.
+
+    Writes to Postgres when DATABASE_URL is set, falls back to JSONL otherwise.
+    """
     high_severity = any(f.get("severity") == "high" for f in result["semantic_findings"])
     entry = {
-        "timestamp":       datetime.utcnow().isoformat(),
-        "user_id":         user_id,
-        "safe_to_send":    result["safe_to_send"],
-        "findings_count":  len(result["regex_findings"]) + len(result["semantic_findings"]),
-        "finding_types":   [f["type"] for f in result["regex_findings"]] +
-                           [f["type"] for f in result["semantic_findings"]],
-        "severity":        "high" if high_severity else "medium" if result["semantic_findings"] else "low",
-        "regulation":      list({f.get("regulation", "general") for f in result["semantic_findings"]}),
-        "baseten_escalated": result.get("baseten_escalated", False),
-        "openai_confirmed":  result.get("openai_confirmed"),
+        "timestamp":          datetime.now(timezone.utc).isoformat(),
+        "user_id":            user_id,
+        "safe_to_send":       result["safe_to_send"],
+        "findings_count":     len(result["regex_findings"]) + len(result["semantic_findings"]),
+        "finding_types":      [f["type"] for f in result["regex_findings"]] +
+                              [f["type"] for f in result["semantic_findings"]],
+        "severity":           "high" if high_severity else "medium" if result["semantic_findings"] else "low",
+        "regulation":         list({f.get("regulation", "general") for f in result["semantic_findings"]}),
+        "baseten_escalated":  result.get("baseten_escalated", False),
+        "openai_confirmed":   result.get("openai_confirmed"),
     }
+
+    conn = _get_db_conn()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO dlp_audit_log
+                       (timestamp, user_id, safe_to_send, findings_count,
+                        finding_types, severity, regulation, baseten_escalated, openai_confirmed)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (
+                        entry["timestamp"], entry["user_id"], entry["safe_to_send"],
+                        entry["findings_count"], json.dumps(entry["finding_types"]),
+                        entry["severity"], json.dumps(entry["regulation"]),
+                        entry["baseten_escalated"], json.dumps(entry["openai_confirmed"]),
+                    ),
+                )
+            logger.info(f"Audit log → Postgres for user {user_id} — severity: {entry['severity']}")
+            return
+        except Exception as e:
+            logger.error(f"Postgres audit log failed, falling back to JSONL: {e}")
+
     with open(LOG_FILE, "a") as f:
         f.write(json.dumps(entry) + "\n")
-    logger.info(f"Audit log written for user {user_id} — severity: {entry['severity']}")
+    logger.info(f"Audit log → JSONL for user {user_id} — severity: {entry['severity']}")
 
 # --- You.com insurance coverage search ---
 
@@ -536,6 +618,7 @@ def scan_and_clean(text: str, user_id: str = "anonymous") -> dict:
                 openai_result = openai_second_opinion(text, high_severity)
 
     clean = redact_text(text, regex_hits)
+    clean = redact_semantic_findings(clean, semantic_hits)
     safe  = len(regex_hits) == 0 and len(semantic_hits) == 0
 
     result = {
