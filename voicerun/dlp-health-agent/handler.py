@@ -125,11 +125,12 @@ def _build_system_prompt(
 
 
 async def handler(event: Event, context: Context):
+    # Provider must be re-registered per event — Voicerun deployment runtime
+    # runs each event as a sibling task, so ContextVar state from StartEvent
+    # does not leak to TextEvent. Idempotent: replaces prior registration.
+    configure_provider(PROVIDER, voicerun_managed=True)
 
     if isinstance(event, StartEvent):
-        configure_provider(PROVIDER, voicerun_managed=True)
-
-        # Read API keys from context.variables (set in Voicerun environment dashboard)
         context.set_data("api_keys", {
             "ANTHROPIC_API_KEY": context.variables.get("ANTHROPIC_API_KEY"),
             "OPENAI_API_KEY":    context.variables.get("OPENAI_API_KEY"),
@@ -294,7 +295,13 @@ async def handler(event: Event, context: Context):
 
             context.set_completion_messages(messages)
 
-        except Exception:
+        except Exception as e:
+            yield DebugEvent(
+                event_name="handler_error",
+                event_data={"error": str(e), "type": type(e).__name__},
+                direction="output",
+                context={},
+            )
             yield TextToSpeechEvent(text=ERROR_MESSAGE, voice=VOICE)
 
     if isinstance(event, TimeoutEvent):

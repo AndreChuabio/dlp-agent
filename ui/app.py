@@ -491,7 +491,7 @@ st.markdown("---")
 
 # --- Tabs ---
 chat_tab, scan_tab, voice_tab, debug_tab, coverage_tab = st.tabs(
-    ["Agent Chat", "DLP Scanner", "Voice Input", "🔍 Debug Replay", "🛡️ DLP Coverage"]
+    ["Agent Chat", "DLP Scanner", "📞 Live Phone Demo", "🔍 Debug Replay", "🛡️ DLP Coverage"]
 )
 
 # ============================================================
@@ -622,17 +622,63 @@ with scan_tab:
             st.warning("Enter a message to scan.")
 
 # ============================================================
-# TAB 3 — Voice input
+# TAB 3 — Voice input (live phone demo + Whisper fallback)
 # ============================================================
 with voice_tab:
-    voicerun_number = os.getenv("VOICERUN_PHONE_NUMBER", "")
-    if voicerun_number:
-        st.info(f"Live phone demo: call **{voicerun_number}** — speak naturally, PHI is intercepted before reaching any AI.")
-    else:
-        st.info("Set VOICERUN_PHONE_NUMBER in .env to enable live phone demo.")
+    voicerun_number = os.getenv("VOICERUN_PHONE_NUMBER", "+14155491590")
+    tel_href = "tel:" + re.sub(r"[^\d+]", "", voicerun_number)
+    display_number = voicerun_number
+    if voicerun_number.startswith("+1") and len(voicerun_number) == 12:
+        display_number = f"+1 ({voicerun_number[2:5]}) {voicerun_number[5:8]}-{voicerun_number[8:]}"
+
+    hero_left, hero_right = st.columns([3, 2], gap="large")
+
+    with hero_left:
+        st.markdown("### Call MediGuard AI live")
+        st.markdown(
+            f"<div style='font-size:2.6rem;font-weight:700;letter-spacing:-0.02em;"
+            f"margin:0.4rem 0 0.6rem 0;'>{display_number}</div>",
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            "Speak naturally. Voicerun handles the call; our DLP layer intercepts every "
+            "turn before it touches the LLM. Specialist triage runs on Claude Haiku."
+        )
+        st.link_button(f"Call {display_number}", tel_href, type="primary", use_container_width=False)
+
+    with hero_right:
+        st.markdown("**Per-turn pipeline**")
+        st.markdown(
+            "1. Voicerun STT (caller → text)\n"
+            "2. Regex PHI scan\n"
+            "3. Baseten DeepSeek triage\n"
+            "4. Claude Haiku semantic\n"
+            "5. Redact + append to audit log\n"
+            "6. GPT-4o generates reply with redacted history\n"
+            "7. Voicerun TTS (text → speech)"
+        )
+
     st.markdown("---")
-    st.caption("Or record a patient message below. Transcribed via Whisper then scanned before reaching any model.")
-    audio = st.audio_input("Record patient message")
+
+    sample_left, sample_right = st.columns(2, gap="large")
+    with sample_left:
+        st.markdown("**Try saying:**")
+        st.markdown(
+            "> _\"Hi, my name is Alice Johnson. My date of birth is March 22nd, 1975. "
+            "I've been having chest tightness when I climb stairs.\"_"
+        )
+    with sample_right:
+        st.markdown("**Expected behavior:**")
+        st.markdown(
+            "- Name + DOB redacted at ingress\n"
+            "- Claude Haiku triages to Cardiology\n"
+            "- Agent recommends Dr. Sarah Chen"
+        )
+
+    st.markdown("---")
+    st.markdown("#### Can't call right now? Record a message instead")
+    st.caption("Transcribed via Whisper, then run through the same DLP pipeline.")
+    audio = st.audio_input("Record patient message", label_visibility="collapsed")
     if audio and st.button("Transcribe + Scan", type="primary", key="voice_scan"):
         with st.spinner("Transcribing..."):
             try:
