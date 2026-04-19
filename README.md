@@ -1,6 +1,12 @@
 # MediGuard AI
 
+[![PyPI version](https://img.shields.io/pypi/v/mediguard-dlp.svg)](https://pypi.org/project/mediguard-dlp/)
+[![Python](https://img.shields.io/pypi/pyversions/mediguard-dlp.svg)](https://pypi.org/project/mediguard-dlp/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 HIPAA-compliant AI middleware and primary care onboarding agent. Drop it in front of any LLM and patient conversations are automatically scanned, redacted, and logged. The voice agent layer onboards patients and routes them directly to the right specialist — no forms, no waiting room, no GP appointment just to get a referral.
+
+Ships as both a **standalone app** (voice agent, dashboard, FastAPI) and an **installable MCP server** (`pipx install mediguard-dlp`) that plugs into Claude Code, Claude Desktop, Cursor, and Windsurf.
 
 ---
 
