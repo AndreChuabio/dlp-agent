@@ -1,0 +1,23 @@
+{
+  "name": "mediguard-dlp",
+  "version": "0.1.0",
+  "description": "Local HIPAA DLP layer for LLM workflows. Scans, redacts, and audits PHI before it reaches any model.",
+  "author": {
+    "name": "Andre Chuabio",
+    "email": "andre102599@gmail.com",
+    "url": "https://github.com/AndreChuabio"
+  },
+  "homepage": "https://github.com/AndreChuabio/dlp-agent",
+  "repository": "https://github.com/AndreChuabio/dlp-agent",
+  "license": "MIT",
+  "keywords": ["dlp", "hipaa", "phi", "privacy", "healthcare", "redaction", "compliance", "mcp"],
+  "mcpServers": {
+    "mediguard-dlp": {
+      "command": "mediguard-dlp",
+      "args": [],
+      "env": {
+        "SECRETS_FILE": "${CLAUDE_PLUGIN_ROOT}/secrets/local.secrets"
+      }
+    }
+  }
+}

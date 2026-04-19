@@ -124,6 +124,77 @@ vr push && vr open
 
 ---
 
+## Use as an MCP Server (Claude Code / Desktop / Cursor / Windsurf)
+
+MediGuard ships as an installable MCP server — add a few lines to your client's config and every chat gets a local PHI firewall, redactor, and session replay debugger. Raw data never leaves your machine.
+
+### Install
+
+```bash
+pipx install mediguard-dlp
+# or, from this repo:
+pip install -e .
+```
+
+This registers a `mediguard-dlp` CLI on your PATH. Verify with `which mediguard-dlp`.
+
+### Configure your MCP client
+
+**Claude Code** — add to `~/.claude/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "mediguard-dlp": {
+      "command": "mediguard-dlp"
+    }
+  }
+}
+```
+
+**Claude Desktop** — edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%/Claude/claude_desktop_config.json` (Windows):
+
+```json
+{
+  "mcpServers": {
+    "mediguard-dlp": {
+      "command": "mediguard-dlp",
+      "env": {
+        "ANTHROPIC_API_KEY": "sk-ant-...",
+        "BASETEN_API_KEY": "...",
+        "OPENAI_API_KEY": "sk-..."
+      }
+    }
+  }
+}
+```
+
+**Cursor / Windsurf** — same config block under their MCP settings.
+
+If `ANTHROPIC_API_KEY` and `BASETEN_API_KEY` aren't set, the server runs in **regex-only mode** — still catches structured identifiers (SSN, MRN, DOB, phone, insurance IDs, ZIP) with zero network calls.
+
+### Tools exposed
+
+| Tool             | Purpose                                                                |
+|------------------|------------------------------------------------------------------------|
+| `dlp_scan`       | Full pipeline scan — regex + Baseten triage + Claude semantic          |
+| `quick_redact`   | Regex-only redaction, sub-millisecond, no API calls                    |
+| `ingest_payload` | Load a production log, redact PHI locally, save the clean version      |
+| `replay_session` | Step a saved session through the agent pipeline                        |
+| `list_sessions`  | List saved debug sessions                                              |
+| `check_secrets`  | Show which secret keys are loaded (values never returned)              |
+
+### Claude Code plugin (alternative install)
+
+This repo is also a Claude Code plugin. From Claude Code:
+
+```
+/plugin marketplace add AndreChuabio/dlp-agent
+/plugin install mediguard-dlp
+```
+
+---
+
 ## Environment Variables
 
 ```

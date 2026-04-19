@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mediguard-dlp"
+version = "0.1.0"
+description = "Local HIPAA DLP layer for LLM workflows — MCP server for Claude Code, Claude Desktop, Cursor, Windsurf"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Andre Chuabio", email = "andre102599@gmail.com" },
+]
+keywords = [
+    "mcp", "dlp", "hipaa", "phi", "privacy", "claude", "llm",
+    "healthcare", "redaction", "compliance",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Healthcare Industry",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+dependencies = [
+    "mcp>=1.0.0",
+    "anthropic>=0.40.0",
+    "openai>=1.40.0",
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0.0"]
+
+[project.scripts]
+mediguard-dlp = "mediguard_dlp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/AndreChuabio/dlp-agent"
+Repository = "https://github.com/AndreChuabio/dlp-agent"
+Issues = "https://github.com/AndreChuabio/dlp-agent/issues"
+
+[tool.setuptools]
+packages = ["mediguard_dlp", "agent"]

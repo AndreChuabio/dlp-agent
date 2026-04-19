@@ -1,10 +1,9 @@
 {
   "mcpServers": {
     "mediguard-dlp": {
-      "command": "python",
-      "args": ["mcp_server.py"],
+      "command": "mediguard-dlp",
+      "args": [],
       "env": {
-        "PYTHONPATH": ".",
         "SECRETS_FILE": "secrets/local.secrets"
       }
     }
