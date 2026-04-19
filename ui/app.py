@@ -14,7 +14,208 @@ from agent.tools import scan_and_clean, extract_patient_info, search_insurance_c
 from agent.replay import ingest_payload, replay_session
 import anthropic
 
-st.set_page_config(page_title="MediGuard AI", layout="wide")
+st.set_page_config(
+    page_title="MediGuard AI",
+    page_icon="🛡️",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# --- Global style polish ---
+st.markdown(
+    """
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+      html, body, [class*="css"], .stMarkdown, .stButton, .stTextInput, .stSelectbox {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
+      }
+      code, pre, .stCode, .stCodeBlock {
+        font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace !important;
+      }
+
+      /* Main container breathing room */
+      .main .block-container {
+        padding-top: 2.5rem;
+        padding-bottom: 4rem;
+        max-width: 1280px;
+      }
+
+      /* Tighter, sharper headings */
+      h1, h2, h3, h4 {
+        letter-spacing: -0.02em !important;
+        font-weight: 700 !important;
+      }
+      h1 { font-size: 2.4rem !important; }
+
+      /* Brand-colored gradient accent on the H1 */
+      .mg-title {
+        background: linear-gradient(90deg, #0f766e 0%, #0891b2 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+      }
+      .mg-tagline {
+        color: #57534e;
+        font-size: 1.05rem;
+        margin-top: -0.5rem;
+        margin-bottom: 0.25rem;
+      }
+      .mg-badges {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        margin: 0.75rem 0 0.25rem 0;
+      }
+      .mg-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        padding: 0.28rem 0.7rem;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        font-weight: 500;
+        background: #f0fdfa;
+        color: #0f766e;
+        border: 1px solid #ccfbf1;
+      }
+      .mg-badge.warn { background:#fffbeb; color:#b45309; border-color:#fde68a; }
+      .mg-badge.danger { background:#fef2f2; color:#b91c1c; border-color:#fecaca; }
+      .mg-badge.live::before {
+        content: "";
+        width: 7px; height: 7px; border-radius: 50%;
+        background: #10b981;
+        box-shadow: 0 0 0 0 rgba(16,185,129,0.7);
+        animation: mg-pulse 1.8s infinite;
+      }
+      @keyframes mg-pulse {
+        0%   { box-shadow: 0 0 0 0   rgba(16,185,129,0.6); }
+        70%  { box-shadow: 0 0 0 8px rgba(16,185,129,0); }
+        100% { box-shadow: 0 0 0 0   rgba(16,185,129,0); }
+      }
+
+      /* Hero card for the phone number */
+      .mg-phone-card {
+        background: linear-gradient(135deg, #ffffff 0%, #f0fdfa 100%);
+        border: 1px solid #ccfbf1;
+        border-radius: 16px;
+        padding: 1.75rem 2rem;
+        box-shadow: 0 1px 2px rgba(15,118,110,0.06), 0 8px 24px -12px rgba(15,118,110,0.15);
+      }
+      .mg-phone-eyebrow {
+        font-size: 0.75rem;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #0f766e;
+        margin-bottom: 0.25rem;
+      }
+      .mg-phone-number {
+        font-family: 'JetBrains Mono', ui-monospace, monospace;
+        font-size: 2.8rem;
+        font-weight: 700;
+        letter-spacing: -0.03em;
+        line-height: 1.1;
+        color: #0c4a6e;
+        margin: 0.1rem 0 0.6rem 0;
+      }
+
+      /* Pipeline list — cleaner */
+      .mg-steps {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        counter-reset: mg-step;
+      }
+      .mg-steps li {
+        counter-increment: mg-step;
+        padding: 0.45rem 0 0.45rem 2.2rem;
+        position: relative;
+        border-bottom: 1px solid #f5f5f4;
+        font-size: 0.94rem;
+        color: #292524;
+      }
+      .mg-steps li:last-child { border-bottom: none; }
+      .mg-steps li::before {
+        content: counter(mg-step);
+        position: absolute;
+        left: 0; top: 0.4rem;
+        width: 1.6rem; height: 1.6rem;
+        border-radius: 50%;
+        background: #0f766e;
+        color: white;
+        font-weight: 600;
+        font-size: 0.78rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      /* Tabs — underline style */
+      .stTabs [data-baseweb="tab-list"] {
+        gap: 0.25rem;
+        border-bottom: 1px solid #e7e5e4;
+      }
+      .stTabs [data-baseweb="tab"] {
+        padding: 0.6rem 1rem;
+        font-weight: 500;
+        color: #57534e;
+      }
+      .stTabs [aria-selected="true"] {
+        color: #0f766e !important;
+        font-weight: 600 !important;
+      }
+
+      /* Sidebar polish */
+      [data-testid="stSidebar"] {
+        background: #ffffff;
+        border-right: 1px solid #e7e5e4;
+      }
+      [data-testid="stSidebar"] h2,
+      [data-testid="stSidebar"] h3 {
+        font-size: 0.78rem !important;
+        font-weight: 600 !important;
+        letter-spacing: 0.08em !important;
+        text-transform: uppercase;
+        color: #78716c !important;
+        margin-top: 1rem !important;
+      }
+      [data-testid="stSidebar"] hr {
+        margin: 0.75rem 0;
+        border-color: #f5f5f4;
+      }
+
+      /* Buttons */
+      .stButton > button[kind="primary"], .stLinkButton > a[kind="primary"] {
+        background: linear-gradient(135deg, #0f766e 0%, #0891b2 100%) !important;
+        border: none !important;
+        font-weight: 600 !important;
+        box-shadow: 0 2px 6px rgba(15,118,110,0.25) !important;
+      }
+      .stButton > button[kind="primary"]:hover, .stLinkButton > a[kind="primary"]:hover {
+        filter: brightness(1.05);
+        box-shadow: 0 4px 12px rgba(15,118,110,0.35) !important;
+      }
+
+      /* Sample script callout */
+      .mg-sample {
+        background: #f5f5f4;
+        border-left: 3px solid #0f766e;
+        padding: 0.9rem 1.2rem;
+        border-radius: 0 8px 8px 0;
+        font-style: italic;
+        color: #44403c;
+        font-size: 0.95rem;
+      }
+
+      /* Audit log entries */
+      .stCode {
+        font-size: 0.85rem !important;
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 # Try to import the Veris simulation runner (works on Python 3.11 / Railway, may fail locally on 3.9)
 try:
@@ -485,9 +686,18 @@ with st.sidebar:
         st.rerun()
 
 # --- Header ---
-st.title("MediGuard AI — Patient Onboarding")
-st.caption("Patients speak or type naturally. PHI is intercepted before it reaches any AI model.")
-st.markdown("---")
+st.markdown(
+    "<h1 class='mg-title'>MediGuard AI</h1>"
+    "<div class='mg-tagline'>HIPAA-compliant patient onboarding — voice or text, PHI intercepted before it touches any LLM.</div>"
+    "<div class='mg-badges'>"
+    "<span class='mg-badge live'>Live voice demo</span>"
+    "<span class='mg-badge'>HIPAA Safe Harbor · 18 identifiers</span>"
+    "<span class='mg-badge'>42 CFR Part 2</span>"
+    "<span class='mg-badge'>Full audit trail</span>"
+    "</div>",
+    unsafe_allow_html=True,
+)
+st.markdown("<div style='margin: 1.25rem 0 0.5rem 0;'></div>", unsafe_allow_html=True)
 
 # --- Tabs ---
 chat_tab, scan_tab, voice_tab, debug_tab, coverage_tab = st.tabs(
@@ -634,41 +844,67 @@ with voice_tab:
     hero_left, hero_right = st.columns([3, 2], gap="large")
 
     with hero_left:
-        st.markdown("### Call MediGuard AI live")
         st.markdown(
-            f"<div style='font-size:2.6rem;font-weight:700;letter-spacing:-0.02em;"
-            f"margin:0.4rem 0 0.6rem 0;'>{display_number}</div>",
+            f"""
+            <div class="mg-phone-card">
+              <div class="mg-phone-eyebrow">📞 Live voice demo · powered by Voicerun</div>
+              <div class="mg-phone-number">{display_number}</div>
+              <div style="color:#44403c; font-size:0.98rem; margin-bottom:1.1rem; line-height:1.55;">
+                Speak naturally. Voicerun handles the call; our DLP layer intercepts every turn
+                <b>before</b> it touches the LLM. Specialist triage runs on Claude Haiku.
+              </div>
+              <a href="{tel_href}" target="_self" style="
+                display:inline-block;
+                background: linear-gradient(135deg, #0f766e 0%, #0891b2 100%);
+                color: white;
+                padding: 0.7rem 1.4rem;
+                border-radius: 10px;
+                font-weight: 600;
+                text-decoration: none;
+                box-shadow: 0 2px 8px rgba(15,118,110,0.3);
+              ">Tap to call {display_number}</a>
+            </div>
+            """,
             unsafe_allow_html=True,
         )
-        st.caption(
-            "Speak naturally. Voicerun handles the call; our DLP layer intercepts every "
-            "turn before it touches the LLM. Specialist triage runs on Claude Haiku."
-        )
-        st.link_button(f"Call {display_number}", tel_href, type="primary", use_container_width=False)
 
     with hero_right:
-        st.markdown("**Per-turn pipeline**")
         st.markdown(
-            "1. Voicerun STT (caller → text)\n"
-            "2. Regex PHI scan\n"
-            "3. Baseten DeepSeek triage\n"
-            "4. Claude Haiku semantic\n"
-            "5. Redact + append to audit log\n"
-            "6. GPT-4o generates reply with redacted history\n"
-            "7. Voicerun TTS (text → speech)"
+            """
+            <div style="padding: 0.25rem 0.5rem;">
+              <div style="font-size:0.78rem; font-weight:600; letter-spacing:0.08em;
+                          text-transform:uppercase; color:#0f766e; margin-bottom:0.6rem;">
+                Per-turn pipeline
+              </div>
+              <ol class="mg-steps">
+                <li>Voicerun STT &nbsp;—&nbsp; caller speech → text</li>
+                <li>Regex PHI scan &nbsp;—&nbsp; structured identifiers</li>
+                <li>Baseten DeepSeek triage &nbsp;—&nbsp; fast YES/NO gate</li>
+                <li>Claude Haiku semantic &nbsp;—&nbsp; contextual PHI</li>
+                <li>Redact + append to audit log</li>
+                <li>GPT-4o &nbsp;—&nbsp; reply on redacted history</li>
+                <li>Voicerun TTS &nbsp;—&nbsp; text → speech back to caller</li>
+              </ol>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
+    st.markdown("<div style='height:0.75rem'></div>", unsafe_allow_html=True)
     st.markdown("---")
 
     sample_left, sample_right = st.columns(2, gap="large")
     with sample_left:
-        st.markdown("**Try saying:**")
+        st.markdown("**Try saying**")
         st.markdown(
-            "> _\"Hi, my name is Alice Johnson. My date of birth is March 22nd, 1975. "
-            "I've been having chest tightness when I climb stairs.\"_"
+            "<div class='mg-sample'>"
+            "\"Hi, my name is Alice Johnson. My date of birth is March 22nd, 1975. "
+            "I've been having chest tightness when I climb stairs.\""
+            "</div>",
+            unsafe_allow_html=True,
         )
     with sample_right:
-        st.markdown("**Expected behavior:**")
+        st.markdown("**Expected behavior**")
         st.markdown(
             "- Name + DOB redacted at ingress\n"
             "- Claude Haiku triages to Cardiology\n"
