@@ -22,8 +22,22 @@ LOG_FILE = "dlp_audit_log.jsonl"
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-anthropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+_anthropic_client = None
+_openai_client = None
+
+
+def _get_anthropic_client():
+    global _anthropic_client
+    if _anthropic_client is None:
+        _anthropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    return _anthropic_client
+
+
+def _get_openai_client():
+    global _openai_client
+    if _openai_client is None:
+        _openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    return _openai_client
 
 # --- Patterns ---
 
@@ -187,7 +201,7 @@ Text: {text}"""
 def claude_semantic_scan(text: str) -> list[dict]:
     """Deep contextual PHI detection via Claude. Catches what regex misses."""
     try:
-        response = anthropic_client.messages.create(
+        response = _get_anthropic_client().messages.create(
             model="claude-haiku-4-5-20251001",  # Haiku: 3-5x faster than Opus, same quality for classification
             max_tokens=512,
             messages=[{"role": "user", "content": CLAUDE_SCAN_PROMPT.format(text=text)}],
@@ -219,7 +233,7 @@ Reply with ONLY valid JSON: {{"confirmed": true|false, "notes": "brief explanati
 def openai_second_opinion(text: str, findings: list[dict]) -> dict:
     """Cross-validates high severity Claude findings via OpenAI."""
     try:
-        response = openai_client.chat.completions.create(
+        response = _get_openai_client().chat.completions.create(
             model="gpt-4o",
             messages=[{
                 "role": "user",
@@ -346,7 +360,7 @@ def extract_patient_info(messages: list[dict], raw_hint: str = "") -> dict:
         )
 
     try:
-        response = anthropic_client.messages.create(
+        response = _get_anthropic_client().messages.create(
             model="claude-opus-4-6",
             max_tokens=200,
             messages=[{"role": "user", "content": EXTRACTION_PROMPT.format(transcript=transcript) + hint_section}],
@@ -459,7 +473,7 @@ def triage_specialist(reason: str) -> dict | None:
     )
 
     try:
-        response = anthropic_client.messages.create(
+        response = _get_anthropic_client().messages.create(
             model="claude-opus-4-6",
             max_tokens=200,
             messages=[{"role": "user", "content": TRIAGE_PROMPT.format(

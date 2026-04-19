@@ -1,6 +1,6 @@
 {
   "name": "mediguard-dlp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local HIPAA DLP layer for LLM workflows. Scans, redacts, and audits PHI before it reaches any model.",
   "author": {
     "name": "Andre Chuabio",

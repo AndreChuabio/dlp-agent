@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mediguard-dlp"
-version = "0.1.0"
+version = "0.1.1"
 description = "Local HIPAA DLP layer for LLM workflows — MCP server for Claude Code, Claude Desktop, Cursor, Windsurf"
 readme = "README.md"
 requires-python = ">=3.10"
