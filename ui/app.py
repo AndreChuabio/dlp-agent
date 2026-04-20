@@ -805,13 +805,22 @@ with scan_tab:
                 total = len(result["regex_findings"]) + len(result["semantic_findings"])
                 st.error(f"BLOCKED — {total} PHI finding(s) detected and redacted")
 
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("**Original**")
-                st.text_area("", value=result["original"], height=120, disabled=True, key="orig")
-            with col2:
+            # The scan result no longer ships raw text by default. The
+            # original is shown side-by-side only when DLP_DEBUG=true, so a
+            # screenshot or shoulder-surf of the demo UI will not expose PHI.
+            import os as _os
+            _show_original = _os.getenv("DLP_DEBUG", "false").lower() == "true"
+            if _show_original:
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("**Original (DLP_DEBUG)**")
+                    st.text_area("", value=text_input, height=120, disabled=True, key="orig")
+                with col2:
+                    st.markdown("**Redacted (sent to AI)**")
+                    st.text_area("", value=result["clean"], height=120, disabled=True, key="clean")
+            else:
                 st.markdown("**Redacted (sent to AI)**")
-                st.text_area("", value=result["clean"],    height=120, disabled=True, key="clean")
+                st.text_area("", value=result["clean"], height=120, disabled=True, key="clean")
 
             fcol1, fcol2, fcol3 = st.columns(3)
             fcol1.metric("Regex Hits",        len(result["regex_findings"]))

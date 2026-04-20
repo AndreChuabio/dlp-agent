@@ -204,9 +204,22 @@ async def handler(event: Event, context: Context):
                 merged_info[k] = v
         context.set_data("patient_info", merged_info)
 
+        # DebugEvents appear in the Voicerun debugger UI. Emit only
+        # presence-flags so a shoulder-surf of the debugger never exposes the
+        # collected name / DOB / phone / insurance_id in plain text.
         yield DebugEvent(
             event_name="patient_info",
-            event_data=merged_info,
+            event_data={
+                "has_name":         bool(merged_info.get("patient_name")),
+                "has_dob":          bool(merged_info.get("dob")),
+                "has_phone":        bool(merged_info.get("phone")),
+                "has_insurance_id": bool(merged_info.get("insurance_id")),
+                "has_reason":       bool(merged_info.get("reason")),
+                "fields_collected": len([
+                    k for k, v in merged_info.items()
+                    if v and v not in (None, "null", "")
+                ]),
+            },
             direction="output",
             context={},
         )
@@ -230,10 +243,13 @@ async def handler(event: Event, context: Context):
                 context.set_data("is_returning", False)
                 context.set_data("db_patient", None)
 
+            # Do not echo patient_name into the debugger stream.
             yield DebugEvent(
                 event_name="patient_lookup",
-                event_data={"queried_name": patient_name,
-                            "found": db_patient is not None},
+                event_data={
+                    "queried_name_length": len(patient_name or ""),
+                    "found":               db_patient is not None,
+                },
                 direction="output",
                 context={},
             )

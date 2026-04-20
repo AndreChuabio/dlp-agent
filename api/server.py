@@ -12,7 +12,14 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from pydantic import BaseModel
 from agent.orchestrator import run
-from agent.tools import scan_and_clean, extract_patient_info, search_insurance_coverage
+from agent.tools import (
+    MAX_INPUT_CHARS,
+    scan_and_clean,
+    extract_patient_info,
+    search_insurance_coverage,
+    regex_scan,
+    redact_text,
+)
 import anthropic
 
 logger = logging.getLogger(__name__)
@@ -67,7 +74,12 @@ def _require_api_key(api_key: str = Security(_api_key_header)) -> str:
 
 @app.exception_handler(Exception)
 async def _global_error_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled error on {request.url.path}: {exc}", exc_info=True)
+    # Log the exception type but never the message or traceback -- SDK
+    # exceptions from Anthropic / OpenAI / psycopg2 can echo the request
+    # body on .body / .request attributes, which would put PHI into app logs.
+    logger.error(
+        "Unhandled error on %s (%s)", request.url.path, type(exc).__name__,
+    )
     return JSONResponse(
         status_code=500,
         content={"error": "Internal server error", "code": "INTERNAL_ERROR"},
@@ -86,7 +98,66 @@ SYSTEM_PROMPT = (
     "If a message contains [REDACTED:...] tokens, acknowledge the info was protected and move on."
 )
 
+# Session store. TTL prevents unbounded growth, and the max-size cap evicts
+# the oldest session when full. This is still in-process memory -- Redis
+# with per-tenant isolation is tracked for a follow-up.
+_SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "1800"))
+_SESSION_MAX = int(os.getenv("SESSION_MAX", "1000"))
 _sessions: dict = {}
+
+
+def _get_session(session_id: str) -> dict:
+    """Return the session for session_id, evicting stale or oldest entries."""
+    import time
+    now = time.monotonic()
+
+    # Drop expired.
+    expired = [
+        sid for sid, s in _sessions.items()
+        if now - s.get("_last_seen", now) > _SESSION_TTL_SECONDS
+    ]
+    for sid in expired:
+        _sessions.pop(sid, None)
+
+    # Size cap -- evict oldest by last_seen if at capacity and creating new.
+    if session_id not in _sessions and len(_sessions) >= _SESSION_MAX:
+        oldest = min(_sessions, key=lambda k: _sessions[k].get("_last_seen", 0))
+        _sessions.pop(oldest, None)
+
+    session = _sessions.setdefault(session_id, {
+        "messages": [], "patient_info": {}, "coverage": None,
+    })
+    session["_last_seen"] = now
+    return session
+
+
+def _sanitize_patient_info_for_prompt(info: dict) -> dict:
+    """Drop PHI fields before injecting collected info into a system prompt.
+
+    We tell the model what has been collected (so it does not re-ask), but
+    not the values themselves. If the model needs the real value (e.g. to
+    confirm back to the patient), that is a tool call, not a prompt leak.
+    """
+    return {
+        "has_name":         bool(info.get("patient_name")),
+        "has_dob":          bool(info.get("dob")),
+        "has_phone":        bool(info.get("phone")),
+        "has_insurance_id": bool(info.get("insurance_id")),
+        "reason_collected": bool(info.get("reason")),
+    }
+
+
+def _scrub_outbound(text: str) -> str:
+    """Final-gate redaction on text leaving the service.
+
+    LLMs occasionally regurgitate prior-turn content. Running the same regex
+    pass on the outbound reply closes the loop so structured PHI cannot exit
+    the service even if the model echoes it.
+    """
+    if not text:
+        return text
+    findings = regex_scan(text)
+    return redact_text(text, findings) if findings else text
 
 
 # ---------------------------------------------------------------------------
@@ -107,9 +178,21 @@ class ChatRequest(BaseModel):
 # Endpoints
 # ---------------------------------------------------------------------------
 
+def _reject_if_oversized(text: str) -> None:
+    if len(text) > MAX_INPUT_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "error": f"Input exceeds maximum of {MAX_INPUT_CHARS} characters",
+                "code": "INPUT_TOO_LARGE",
+            },
+        )
+
+
 @app.post("/scan")
 @limiter.limit("60/minute")
 def scan(request: Request, req: ScanRequest, api_key: str = Security(_require_api_key)):
+    _reject_if_oversized(req.text)
     result = run(text=req.text, user_id=req.user_id)
     return result
 
@@ -118,7 +201,8 @@ def scan(request: Request, req: ScanRequest, api_key: str = Security(_require_ap
 @limiter.limit("30/minute")
 def chat(request: Request, req: ChatRequest, api_key: str = Security(_require_api_key)):
     """Veris-compatible chat endpoint. Runs full DLP pipeline before LLM."""
-    session = _sessions.setdefault(req.session_id, {"messages": [], "patient_info": {}, "coverage": None})
+    _reject_if_oversized(req.message)
+    session = _get_session(req.session_id)
 
     dlp_result = scan_and_clean(req.message, user_id=req.session_id)
     clean_message = dlp_result["clean"]
@@ -136,21 +220,38 @@ def chat(request: Request, req: ChatRequest, api_key: str = Security(_require_ap
             reason=session["patient_info"].get("reason", ""),
         )
 
+    # Inject only presence-flags into the system prompt -- the model does not
+    # need the actual values to drive the conversation, so keep PHI out of the
+    # prompt entirely. The model is told which fields have been collected.
     system = SYSTEM_PROMPT
     if session["patient_info"]:
-        system += f"\n\nCollected so far: {json.dumps(session['patient_info'])}"
+        system += (
+            "\n\nFields collected so far (values withheld for HIPAA): "
+            f"{json.dumps(_sanitize_patient_info_for_prompt(session['patient_info']))}"
+        )
     if session["coverage"] and session["coverage"].get("results"):
-        snippets = " | ".join(r["snippet"] for r in session["coverage"]["results"][:2] if r.get("snippet"))
+        # Coverage snippets come from a third-party search; scrub them too.
+        snippets = " | ".join(
+            _scrub_outbound(r["snippet"])
+            for r in session["coverage"]["results"][:2]
+            if r.get("snippet")
+        )
         system += f"\n\nInsurance coverage info: {snippets}"
 
-    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    client = anthropic.Anthropic(
+        api_key=os.getenv("ANTHROPIC_API_KEY"),
+        timeout=float(os.getenv("DLP_CLAUDE_TIMEOUT", "15")),
+    )
     response = client.messages.create(
         model="claude-opus-4-6",
         max_tokens=300,
         system=system,
         messages=session["messages"],
     )
-    reply = response.content[0].text
+    raw_reply = response.content[0].text
+
+    # Outbound scrubber: catch any structured PHI the model may have echoed.
+    reply = _scrub_outbound(raw_reply)
 
     session["messages"].append({"role": "assistant", "content": reply})
 
@@ -160,6 +261,7 @@ def chat(request: Request, req: ChatRequest, api_key: str = Security(_require_ap
         "dlp": {
             "safe_to_send": dlp_result["safe_to_send"],
             "findings_count": len(dlp_result["regex_findings"]) + len(dlp_result["semantic_findings"]),
+            "outbound_scrubbed": reply != raw_reply,
         },
     }
 

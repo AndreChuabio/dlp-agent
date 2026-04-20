@@ -1,13 +1,15 @@
 """
 DLP Agent tools — full detection pipeline.
-Order: Voicerun → regex → Baseten triage → Claude semantic → OpenAI second opinion → redact → log
+Order: Voicerun → regex → redact → Baseten triage → Claude semantic → OpenAI second opinion → log
 """
 
 import re
 import json
 import logging
 import os
+import hmac
 import hashlib
+import secrets
 import requests
 from datetime import datetime, timezone
 
@@ -18,6 +20,26 @@ from dotenv import load_dotenv
 load_dotenv()
 
 LOG_FILE = "dlp_audit_log.jsonl"
+
+# Hard cap on input size. Above this, scan_and_clean raises ValueError.
+# Protects against cost/latency blowups and catastrophic-backtracking DoS on
+# greedy regex patterns like street_address.
+MAX_INPUT_CHARS = int(os.getenv("DLP_MAX_INPUT_CHARS", "16000"))
+
+# Per-process random key used to HMAC the cache index so a memory/swap dump
+# never yields a recoverable hash of raw PHI.
+_CACHE_HMAC_KEY = secrets.token_bytes(32)
+
+# Timeouts (seconds) for external calls. Prevents a hung provider from stalling
+# a worker and causing queue backup.
+_BASETEN_TIMEOUT = float(os.getenv("DLP_BASETEN_TIMEOUT", "8"))
+_CLAUDE_TIMEOUT = float(os.getenv("DLP_CLAUDE_TIMEOUT", "15"))
+_OPENAI_TIMEOUT = float(os.getenv("DLP_OPENAI_TIMEOUT", "20"))
+
+# Opt-in debug flag. When true, callers may retrieve the original text via
+# scan_and_clean(..., include_original=True). Off by default to prevent
+# accidental raw-PHI exposure in logs, caches, or UIs.
+DLP_DEBUG = os.getenv("DLP_DEBUG", "false").lower() == "true"
 
 # ---------------------------------------------------------------------------
 # Audit log backend — Postgres when DATABASE_URL is set, JSONL fallback
@@ -40,7 +62,9 @@ def _get_db_conn():
             _ensure_audit_table(_db_conn)
         except Exception as e:
             logging.getLogger(__name__).error(
-                f"Postgres connection failed, falling back to JSONL: {e}")
+                "Postgres connection failed (%s), falling back to JSONL.",
+                type(e).__name__,
+            )
             return None
     return _db_conn
 
@@ -74,14 +98,19 @@ def _get_anthropic_client():
     global _anthropic_client
     if _anthropic_client is None:
         _anthropic_client = anthropic.Anthropic(
-            api_key=os.getenv("ANTHROPIC_API_KEY"))
+            api_key=os.getenv("ANTHROPIC_API_KEY"),
+            timeout=_CLAUDE_TIMEOUT,
+        )
     return _anthropic_client
 
 
 def _get_openai_client():
     global _openai_client
     if _openai_client is None:
-        _openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        _openai_client = OpenAI(
+            api_key=os.getenv("OPENAI_API_KEY"),
+            timeout=_OPENAI_TIMEOUT,
+        )
     return _openai_client
 
 # --- Patterns ---
@@ -142,14 +171,26 @@ PATTERNS = {
     "ip_address": r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
     # 16. Biometric identifiers — can't regex audio/images; flagged at semantic layer
     # 17. Full-face photos — same; handled semantically
-    # NPI, ICD codes
+    # NPI
     "npi_number":    r"\bNPI[\s:#-]*\d{10}\b",
-    "icd_code":      r"\b[A-Z]\d{2}\.?\d{0,2}\b",
-    # Medications (dosage mentions)
-    "medication":    r"\b\d+\s*mg\b",
-    "ip_address":    r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
-    "street_address": r"\b\d+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+(Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln|Way|Court|Ct|Place|Pl)\b",
+    # ICD-10 code — case-sensitive (see _CASE_SENSITIVE_PATTERNS) to avoid matching
+    # arbitrary lowercase tokens like "a12" or "the123".
+    "icd_code":      r"\b[A-Z]\d{2}(?:\.\d{1,2})?\b",
+    # Medication dosage — require a drug-name token or clinical verb nearby so
+    # "5 mg" in a recipe doesn't trip redaction. Matches "50mg sertraline",
+    # "sertraline 50 mg", "taking 10 mg", "prescribed 25mg".
+    "medication": (
+        r"\b\d+\s*mg\s+[A-Za-z]{3,}\b"
+        r"|\b[A-Za-z]{3,}\s+\d+\s*mg\b"
+        r"|\b(?:take|taking|took|takes|prescrib(?:ed|ing)|dose|dosage|on)\s+\d+\s*mg\b"
+    ),
 }
+
+# Fail loud at import if patterns collide — silent dict overwrite was the
+# source of the duplicate-key bug that dropped earlier pattern definitions.
+assert len(PATTERNS) == len({k.lower() for k in PATTERNS}), (
+    "Duplicate PATTERNS keys detected"
+)
 
 # --- Step 1: Voicerun transcription ---
 
@@ -162,16 +203,16 @@ def transcribe_audio(audio_source) -> str:
         logger.info("Voicerun transcription complete.")
         return transcript
     except Exception as e:
-        logger.error(f"Voicerun transcription failed: {e}")
+        logger.error("Voicerun transcription failed (%s).", type(e).__name__)
         raise
 
 # --- Step 2: Regex scan ---
 
 
 # Patterns that need case-sensitive matching to avoid false positives.
-# "patient_name" requires capital letters so "I am going to the store"
-# doesn't match, but "I am Alice Johnson" does.
-_CASE_SENSITIVE_PATTERNS = {"patient_name"}
+# - patient_name: requires capitalized words so "I am going to the store" doesn't match.
+# - icd_code: prevents "a12", "the123" etc. from being flagged as ICD-10 codes.
+_CASE_SENSITIVE_PATTERNS = {"patient_name", "icd_code"}
 
 
 def regex_scan(text: str) -> list[dict]:
@@ -217,7 +258,9 @@ def baseten_triage(text: str, api_keys: dict = None) -> bool:
     )
 
     try:
-        baseten_client = OpenAI(api_key=api_key, base_url=BASETEN_BASE_URL)
+        baseten_client = OpenAI(
+            api_key=api_key, base_url=BASETEN_BASE_URL, timeout=_BASETEN_TIMEOUT,
+        )
         response = baseten_client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
@@ -228,7 +271,9 @@ def baseten_triage(text: str, api_keys: dict = None) -> bool:
         logger.info(f"Baseten triage result ({model}): {output}")
         return "YES" in output
     except Exception as e:
-        logger.error(f"Baseten triage failed: {e} — defaulting to escalate.")
+        # Never log the exception message — provider SDK errors can echo the
+        # request body, which would put the scanned text into app logs.
+        logger.error("Baseten triage failed (%s) — defaulting to escalate.", type(e).__name__)
         return True
 
 # --- Step 4: Claude semantic scan ---
@@ -259,7 +304,11 @@ def claude_semantic_scan(text: str, api_keys: dict = None) -> list[dict]:
     """Deep contextual PHI detection via Claude. Catches what regex misses."""
     api_keys = api_keys or {}
     anthropic_key = api_keys.get("ANTHROPIC_API_KEY")
-    client = anthropic.Anthropic(api_key=anthropic_key) if anthropic_key else _get_anthropic_client()
+    client = (
+        anthropic.Anthropic(api_key=anthropic_key, timeout=_CLAUDE_TIMEOUT)
+        if anthropic_key
+        else anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), timeout=_CLAUDE_TIMEOUT)
+    )
     try:
         response = client.messages.create(
             # Haiku: 3-5x faster than Opus, same quality for classification
@@ -279,32 +328,53 @@ def claude_semantic_scan(text: str, api_keys: dict = None) -> list[dict]:
         result = json.loads(raw)
         return result.get("findings", [])
     except Exception as e:
-        logger.error(f"Claude semantic scan failed: {e}")
+        logger.error("Claude semantic scan failed (%s).", type(e).__name__)
         return []
 
 # --- Step 5: OpenAI second opinion (high severity only) ---
 
 
-OPENAI_VALIDATION_PROMPT = """A medical AI safety system flagged the following text excerpts as HIGH severity PHI.
-Validate whether these findings are correct. Be strict -- patient safety and HIPAA compliance depend on accuracy.
+OPENAI_VALIDATION_PROMPT = """A medical AI safety system flagged PHI of the following categories at HIGH severity.
+Validate whether these category/severity assignments are plausible given the stated reason.
+Do NOT request or infer the underlying text -- it has been withheld for HIPAA reasons.
 
 Flagged findings: {findings}
 
 Reply with ONLY valid JSON: {{"confirmed": true|false, "notes": "brief explanation"}}"""
 
 
+# Fields sent to the OpenAI validator. The `excerpt` field (containing the raw
+# PHI Claude identified) is intentionally excluded -- sending it would bypass
+# the "redacted-only egress" promise.
+_OPENAI_VALIDATION_FIELDS = ("type", "reason", "severity", "regulation")
+
+
 def openai_second_opinion(findings: list[dict], api_keys: dict = None) -> dict:
-    """Cross-validates high severity Claude findings via OpenAI. Receives only findings, never raw text."""
+    """Cross-validate high-severity Claude findings via OpenAI.
+
+    Receives finding metadata only -- never the `excerpt` field, which
+    may contain the raw PHI that Claude extracted.
+    """
     api_keys = api_keys or {}
     openai_key = api_keys.get("OPENAI_API_KEY")
-    client = OpenAI(api_key=openai_key) if openai_key else _get_openai_client()
+    client = (
+        OpenAI(api_key=openai_key, timeout=_OPENAI_TIMEOUT)
+        if openai_key
+        else OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=_OPENAI_TIMEOUT)
+    )
+
+    sanitized = [
+        {k: f.get(k) for k in _OPENAI_VALIDATION_FIELDS if k in f}
+        for f in findings
+    ]
+
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[{
                 "role": "user",
                 "content": OPENAI_VALIDATION_PROMPT.format(
-                    findings=json.dumps(findings),
+                    findings=json.dumps(sanitized),
                 )
             }],
             max_tokens=256,
@@ -316,7 +386,7 @@ def openai_second_opinion(findings: list[dict], api_keys: dict = None) -> dict:
         raw = raw.strip()
         return json.loads(raw)
     except Exception as e:
-        logger.error(f"OpenAI second opinion failed: {e}")
+        logger.error("OpenAI second opinion failed (%s).", type(e).__name__)
         return {"confirmed": True, "notes": "validation unavailable — defaulting to confirmed"}
 
 # --- Step 6: Redactor ---
@@ -390,7 +460,9 @@ def log_scan(user_id: str, result: dict) -> None:
             return
         except Exception as e:
             logger.error(
-                f"Postgres audit log failed, falling back to JSONL: {e}")
+                "Postgres audit log failed (%s), falling back to JSONL.",
+                type(e).__name__,
+            )
 
     with open(LOG_FILE, "a") as f:
         f.write(json.dumps(entry) + "\n")
@@ -431,8 +503,8 @@ def search_insurance_coverage(insurance_id: str, reason: str = "") -> dict:
             f"You.com search returned {len(results)} results for insurance_id: {insurance_id[:4]}****")
         return {"results": results, "query": query}
     except Exception as e:
-        logger.error(f"You.com search failed: {e}")
-        return {"error": str(e), "results": []}
+        logger.error("You.com search failed (%s).", type(e).__name__)
+        return {"error": "search_unavailable", "results": []}
 
 
 # --- Patient info extractor ---
@@ -506,7 +578,7 @@ def extract_patient_info(messages: list[dict], raw_text: str = "") -> dict:
         )
         llm_fields = json.loads(response.content[0].text.strip())
     except Exception as e:
-        logger.error(f"Patient info extraction failed: {e}")
+        logger.error("Patient info extraction failed (%s).", type(e).__name__)
         llm_fields = {}
 
     merged = {**llm_fields, **{k: v for k, v in local_fields.items() if v}}
@@ -525,7 +597,7 @@ def _load_doctors() -> list[dict]:
         with open(DOCTORS_FILE) as f:
             return json.load(f).get("doctors", [])
     except Exception as e:
-        logger.error(f"Failed to load doctors: {e}")
+        logger.error("Failed to load doctors (%s).", type(e).__name__)
         return []
 
 
@@ -534,17 +606,35 @@ def _load_patients() -> list[dict]:
         with open(PATIENTS_FILE) as f:
             return json.load(f).get("patients", [])
     except Exception as e:
-        logger.error(f"Failed to load patients: {e}")
+        logger.error("Failed to load patients (%s).", type(e).__name__)
         return []
 
 
 def _save_patients(patients: list[dict]) -> bool:
+    """Persist the patient list atomically with an exclusive file lock.
+
+    Concurrent save_patient calls used to race on read-modify-write and
+    silently clobber each other. flock serialises writers, and writing to a
+    temp file + os.replace makes the swap atomic so a crash mid-write cannot
+    truncate the live file.
+    """
+    import fcntl
+    lock_path = PATIENTS_FILE + ".lock"
+    tmp_path = PATIENTS_FILE + ".tmp"
     try:
-        with open(PATIENTS_FILE, "w") as f:
-            json.dump({"patients": patients}, f, indent=2)
+        # Acquire an exclusive lock on a sidecar lock file. The lock is held
+        # for the write + rename, not for arbitrary caller work.
+        with open(lock_path, "w") as lockf:
+            fcntl.flock(lockf.fileno(), fcntl.LOCK_EX)
+            try:
+                with open(tmp_path, "w") as f:
+                    json.dump({"patients": patients}, f, indent=2)
+                os.replace(tmp_path, PATIENTS_FILE)
+            finally:
+                fcntl.flock(lockf.fileno(), fcntl.LOCK_UN)
         return True
     except Exception as e:
-        logger.error(f"Failed to save patients: {e}")
+        logger.error("Failed to save patients (%s).", type(e).__name__)
         return False
 
 
@@ -616,7 +706,11 @@ def triage_specialist(reason: str, api_keys: dict = None) -> dict | None:
     )
 
     anthropic_key = api_keys.get("ANTHROPIC_API_KEY")
-    client = anthropic.Anthropic(api_key=anthropic_key) if anthropic_key else _get_anthropic_client()
+    client = (
+        anthropic.Anthropic(api_key=anthropic_key, timeout=_CLAUDE_TIMEOUT)
+        if anthropic_key
+        else _get_anthropic_client()
+    )
     try:
         response = client.messages.create(
             model="claude-opus-4-6",
@@ -635,16 +729,17 @@ def triage_specialist(reason: str, api_keys: dict = None) -> dict | None:
             f"Triage result: {result.get('specialist_name')} ({result.get('specialty')})")
         return result
     except Exception as e:
-        logger.error(f"Triage specialist failed: {e}")
+        logger.error("Triage specialist failed (%s).", type(e).__name__)
         return None
 
 
 # --- Full pipeline ---
 
-# In-memory cache: text hash → scan result
-# Prevents redundant API calls for repeated text (common during dev/testing and session replay).
+# In-memory cache of redacted results. Never stores raw text.
+# Keys are HMAC(text, per-process key) so a memory dump cannot be reverse-mapped
+# back to the input text with a precomputed dictionary.
 _scan_cache: dict[str, dict] = {}
-_CACHE_MAX = 256
+_CACHE_MAX = 128
 
 # Set DLP_ENABLE_VALIDATION=true to turn on the OpenAI second-opinion step.
 # Off by default — it adds 1-2s latency and is redundant for most voice/realtime paths.
@@ -652,19 +747,42 @@ _ENABLE_VALIDATION = os.getenv(
     "DLP_ENABLE_VALIDATION", "false").lower() == "true"
 
 
-def scan_and_clean(text: str, user_id: str = "anonymous", api_keys: dict = None) -> dict:
-    """
-    Full DLP pipeline. Input: raw text. Output: findings, redacted text, safe_to_send flag.
+def _cache_key(text: str) -> str:
+    return hmac.new(_CACHE_HMAC_KEY, text.encode("utf-8"), hashlib.sha256).hexdigest()
 
-    Performance notes:
-    - Results are cached in-memory (LRU-style, max 256 entries).
-      Repeated identical text (common in dev and session replay) returns instantly.
-    - Semantic scan uses claude-haiku (3-5x faster than Opus, same PHI classification quality).
-    - OpenAI second-opinion is disabled by default; set DLP_ENABLE_VALIDATION=true to enable.
-    - Baseten model is configurable via BASETEN_MODEL env var.
+
+def scan_and_clean(
+    text: str,
+    user_id: str = "anonymous",
+    api_keys: dict = None,
+    include_original: bool = False,
+) -> dict:
+    """Full DLP pipeline. Input: raw text. Output: redacted text + findings.
+
+    The returned dict never contains the raw input unless `include_original=True`
+    is passed explicitly AND the DLP_DEBUG env flag is set. Callers that need
+    the original text should keep their own reference to what they passed in.
+
+    Order of operations:
+      1. regex scan on raw text (local, no API calls)
+      2. redact structured PII/PHI in-place
+      3. Baseten triage on the redacted text (cost-gate for OpenAI only)
+      4. Claude semantic scan on the redacted text (always runs)
+      5. Apply semantic redaction
+      6. Optional OpenAI second opinion on high-severity findings (metadata only)
+
+    Raises:
+      ValueError: if text exceeds MAX_INPUT_CHARS.
     """
+    if text is None:
+        raise ValueError("text is required")
+    if len(text) > MAX_INPUT_CHARS:
+        raise ValueError(
+            f"Input exceeds DLP_MAX_INPUT_CHARS ({MAX_INPUT_CHARS}); reject upstream."
+        )
+
     api_keys = api_keys or {}
-    cache_key = hashlib.md5(text.encode()).hexdigest()
+    cache_key = _cache_key(text)
     if cache_key in _scan_cache:
         cached = _scan_cache[cache_key]
         log_scan(user_id, cached)  # still audit-log every access
@@ -676,26 +794,28 @@ def scan_and_clean(text: str, user_id: str = "anonymous", api_keys: dict = None)
     # Step 2: redact structured PII/PHI BEFORE any external API call
     redacted = redact_text(text, regex_hits)
 
-    # Step 3+: LLM layers only see the redacted text -- never raw PHI
+    # Step 3: Baseten triage runs on redacted text. Result is advisory ONLY --
+    # a single cheap-model miss must not skip the semantic scan, or one false
+    # negative defeats the whole detector. Baseten's vote now gates only the
+    # (more expensive) OpenAI second-opinion step.
     escalate = baseten_triage(redacted, api_keys=api_keys)
 
-    semantic_hits = []
-    openai_result = None
+    # Step 4: Claude semantic scan always runs on the redacted text.
+    semantic_hits = claude_semantic_scan(redacted, api_keys=api_keys)
 
-    if escalate:
-        semantic_hits = claude_semantic_scan(redacted, api_keys=api_keys)
-        if _ENABLE_VALIDATION:
-            high_severity = [
-                f for f in semantic_hits if f.get("severity") == "high"]
-            if high_severity:
-                openai_result = openai_second_opinion(high_severity, api_keys=api_keys)
-
-    # Apply semantic redaction on top of regex-redacted text
+    # Step 5: Apply semantic redaction on top of regex-redacted text.
     clean = redact_semantic_findings(redacted, semantic_hits)
     safe = len(regex_hits) == 0 and len(semantic_hits) == 0
 
+    # Step 6: Optional OpenAI validation -- gated by both Baseten-escalated AND
+    # the explicit DLP_ENABLE_VALIDATION flag.
+    openai_result = None
+    if _ENABLE_VALIDATION and escalate:
+        high_severity = [f for f in semantic_hits if f.get("severity") == "high"]
+        if high_severity:
+            openai_result = openai_second_opinion(high_severity, api_keys=api_keys)
+
     result = {
-        "original":           text,
         "clean":              clean,
         "regex_findings":     regex_hits,
         "semantic_findings":  semantic_hits,
@@ -704,10 +824,15 @@ def scan_and_clean(text: str, user_id: str = "anonymous", api_keys: dict = None)
         "openai_confirmed":   openai_result,
     }
 
-    # Evict oldest entry if cache is full
+    # Evict oldest entry if cache is full.
     if len(_scan_cache) >= _CACHE_MAX:
         _scan_cache.pop(next(iter(_scan_cache)))
     _scan_cache[cache_key] = result
 
     log_scan(user_id, result)
+
+    # `original` is a debug-only field. Both the env flag and the caller kwarg
+    # must be set -- prevents an accidental True in one place from leaking PHI.
+    if include_original and DLP_DEBUG:
+        return {**result, "original": text}
     return result
