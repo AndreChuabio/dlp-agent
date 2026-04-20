@@ -39,7 +39,8 @@ def _get_db_conn():
             _db_conn.autocommit = True
             _ensure_audit_table(_db_conn)
         except Exception as e:
-            logging.getLogger(__name__).error(f"Postgres connection failed, falling back to JSONL: {e}")
+            logging.getLogger(__name__).error(
+                f"Postgres connection failed, falling back to JSONL: {e}")
             return None
     return _db_conn
 
@@ -61,6 +62,7 @@ def _ensure_audit_table(conn) -> None:
             )
         """)
 
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
@@ -71,7 +73,8 @@ _openai_client = None
 def _get_anthropic_client():
     global _anthropic_client
     if _anthropic_client is None:
-        _anthropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        _anthropic_client = anthropic.Anthropic(
+            api_key=os.getenv("ANTHROPIC_API_KEY"))
     return _anthropic_client
 
 
@@ -82,6 +85,7 @@ def _get_openai_client():
     return _openai_client
 
 # --- Patterns ---
+
 
 PATTERNS = {
     # ── Standard PII ──────────────────────────────────────────────────────────
@@ -149,6 +153,7 @@ PATTERNS = {
 
 # --- Step 1: Voicerun transcription ---
 
+
 def transcribe_audio(audio_source) -> str:
     """Transcribe audio input to text via Voicerun. Returns raw transcript."""
     try:
@@ -161,6 +166,7 @@ def transcribe_audio(audio_source) -> str:
         raise
 
 # --- Step 2: Regex scan ---
+
 
 # Patterns that need case-sensitive matching to avoid false positives.
 # "patient_name" requires capital letters so "I am going to the store"
@@ -184,16 +190,20 @@ def regex_scan(text: str) -> list[dict]:
 
 # --- Step 3: Baseten triage ---
 
+
 # Swap BASETEN_MODEL to test different models — uses OpenAI-compatible API
 BASETEN_BASE_URL = "https://inference.baseten.co/v1"
 BASETEN_MODEL = os.getenv("BASETEN_MODEL", "deepseek-ai/DeepSeek-V3.1")
 
-def baseten_triage(text: str) -> bool:
+
+def baseten_triage(text: str, api_keys: dict = None) -> bool:
     """
     Fast binary triage via Baseten DeepSeek. Returns True if text should be deep-scanned.
-    Uses OpenAI-compatible endpoint — swap BASETEN_MODEL in env to test different models.
+    Uses OpenAI-compatible endpoint -- swap BASETEN_MODEL in env to test different models.
     """
-    api_key = os.getenv("BASETEN_API_KEY")
+    api_keys = api_keys or {}
+    api_key = api_keys.get("BASETEN_API_KEY") or os.getenv("BASETEN_API_KEY")
+    model = api_keys.get("BASETEN_MODEL") or BASETEN_MODEL
 
     if not api_key:
         logger.warning("Baseten not configured — defaulting to escalate.")
@@ -209,13 +219,13 @@ def baseten_triage(text: str) -> bool:
     try:
         baseten_client = OpenAI(api_key=api_key, base_url=BASETEN_BASE_URL)
         response = baseten_client.chat.completions.create(
-            model=BASETEN_MODEL,
+            model=model,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=5,
             temperature=0,
         )
         output = response.choices[0].message.content.strip().upper()
-        logger.info(f"Baseten triage result ({BASETEN_MODEL}): {output}")
+        logger.info(f"Baseten triage result ({model}): {output}")
         return "YES" in output
     except Exception as e:
         logger.error(f"Baseten triage failed: {e} — defaulting to escalate.")
@@ -223,15 +233,19 @@ def baseten_triage(text: str) -> bool:
 
 # --- Step 4: Claude semantic scan ---
 
+
 CLAUDE_SCAN_PROMPT = """Analyze the following medical/healthcare text for sensitive protected health information (PHI).
 
-Regex already caught structured identifiers. Focus on SEMANTIC and CONTEXTUAL PHI:
-- Diagnoses, conditions, symptoms
+Structured identifiers (SSN, MRN, DOB, etc.) have already been redacted and appear as [REDACTED:TYPE] tokens.
+Focus on SEMANTIC and CONTEXTUAL PHI that regex cannot catch:
+- Diagnoses, conditions, symptoms described in natural language
 - Medications, dosages, treatment plans
 - Mental health information (extra protected under 42 CFR Part 2)
 - Lab results, imaging, procedures
 - Insurance or billing context
 - Anything that could identify a patient even without their name
+
+Ignore [REDACTED:...] tokens -- those are already handled.
 
 Return ONLY valid JSON in this format:
 {{"findings": [{{"type": "...", "excerpt": "...", "reason": "...", "severity": "high|medium|low", "regulation": "HIPAA|GDPR|SOC2|general"}}]}}
@@ -240,13 +254,19 @@ If nothing found, return: {{"findings": []}}
 
 Text: {text}"""
 
-def claude_semantic_scan(text: str) -> list[dict]:
+
+def claude_semantic_scan(text: str, api_keys: dict = None) -> list[dict]:
     """Deep contextual PHI detection via Claude. Catches what regex misses."""
+    api_keys = api_keys or {}
+    anthropic_key = api_keys.get("ANTHROPIC_API_KEY")
+    client = anthropic.Anthropic(api_key=anthropic_key) if anthropic_key else _get_anthropic_client()
     try:
-        response = _get_anthropic_client().messages.create(
-            model="claude-haiku-4-5-20251001",  # Haiku: 3-5x faster than Opus, same quality for classification
+        response = client.messages.create(
+            # Haiku: 3-5x faster than Opus, same quality for classification
+            model="claude-haiku-4-5-20251001",
             max_tokens=512,
-            messages=[{"role": "user", "content": CLAUDE_SCAN_PROMPT.format(text=text)}],
+            messages=[
+                {"role": "user", "content": CLAUDE_SCAN_PROMPT.format(text=text)}],
         )
         raw = response.content[0].text.strip()
         # Strip markdown code fences if Claude wraps the response
@@ -264,24 +284,27 @@ def claude_semantic_scan(text: str) -> list[dict]:
 
 # --- Step 5: OpenAI second opinion (high severity only) ---
 
-OPENAI_VALIDATION_PROMPT = """A medical AI safety system flagged the following text as HIGH severity PHI.
-Validate whether this is correct. Be strict — patient safety and HIPAA compliance depend on accuracy.
+
+OPENAI_VALIDATION_PROMPT = """A medical AI safety system flagged the following text excerpts as HIGH severity PHI.
+Validate whether these findings are correct. Be strict -- patient safety and HIPAA compliance depend on accuracy.
 
 Flagged findings: {findings}
-Original text: {text}
 
 Reply with ONLY valid JSON: {{"confirmed": true|false, "notes": "brief explanation"}}"""
 
-def openai_second_opinion(text: str, findings: list[dict]) -> dict:
-    """Cross-validates high severity Claude findings via OpenAI."""
+
+def openai_second_opinion(findings: list[dict], api_keys: dict = None) -> dict:
+    """Cross-validates high severity Claude findings via OpenAI. Receives only findings, never raw text."""
+    api_keys = api_keys or {}
+    openai_key = api_keys.get("OPENAI_API_KEY")
+    client = OpenAI(api_key=openai_key) if openai_key else _get_openai_client()
     try:
-        response = _get_openai_client().chat.completions.create(
+        response = client.chat.completions.create(
             model="gpt-4o",
             messages=[{
                 "role": "user",
                 "content": OPENAI_VALIDATION_PROMPT.format(
                     findings=json.dumps(findings),
-                    text=text,
                 )
             }],
             max_tokens=256,
@@ -297,6 +320,7 @@ def openai_second_opinion(text: str, findings: list[dict]) -> dict:
         return {"confirmed": True, "notes": "validation unavailable — defaulting to confirmed"}
 
 # --- Step 6: Redactor ---
+
 
 def redact_text(text: str, regex_findings: list[dict]) -> str:
     """Replace regex-matched findings in-place with [REDACTED:TYPE] tokens."""
@@ -322,12 +346,14 @@ def redact_semantic_findings(text: str, semantic_findings: list[dict]) -> str:
 
 # --- Step 7: Audit logger ---
 
+
 def log_scan(user_id: str, result: dict) -> None:
     """Append scan result to HIPAA audit log.
 
     Writes to Postgres when DATABASE_URL is set, falls back to JSONL otherwise.
     """
-    high_severity = any(f.get("severity") == "high" for f in result["semantic_findings"])
+    high_severity = any(f.get("severity") ==
+                        "high" for f in result["semantic_findings"])
     entry = {
         "timestamp":          datetime.now(timezone.utc).isoformat(),
         "user_id":            user_id,
@@ -352,21 +378,27 @@ def log_scan(user_id: str, result: dict) -> None:
                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (
                         entry["timestamp"], entry["user_id"], entry["safe_to_send"],
-                        entry["findings_count"], json.dumps(entry["finding_types"]),
+                        entry["findings_count"], json.dumps(
+                            entry["finding_types"]),
                         entry["severity"], json.dumps(entry["regulation"]),
-                        entry["baseten_escalated"], json.dumps(entry["openai_confirmed"]),
+                        entry["baseten_escalated"], json.dumps(
+                            entry["openai_confirmed"]),
                     ),
                 )
-            logger.info(f"Audit log → Postgres for user {user_id} — severity: {entry['severity']}")
+            logger.info(
+                f"Audit log → Postgres for user {user_id} — severity: {entry['severity']}")
             return
         except Exception as e:
-            logger.error(f"Postgres audit log failed, falling back to JSONL: {e}")
+            logger.error(
+                f"Postgres audit log failed, falling back to JSONL: {e}")
 
     with open(LOG_FILE, "a") as f:
         f.write(json.dumps(entry) + "\n")
-    logger.info(f"Audit log → JSONL for user {user_id} — severity: {entry['severity']}")
+    logger.info(
+        f"Audit log → JSONL for user {user_id} — severity: {entry['severity']}")
 
 # --- You.com insurance coverage search ---
+
 
 def search_insurance_coverage(insurance_id: str, reason: str = "") -> dict:
     """
@@ -393,8 +425,10 @@ def search_insurance_coverage(insurance_id: str, reason: str = "") -> dict:
         resp.raise_for_status()
         data = resp.json()
         hits = data.get("hits", [])
-        results = [{"title": h.get("title", ""), "snippet": h.get("description", "")} for h in hits[:3]]
-        logger.info(f"You.com search returned {len(results)} results for insurance_id: {insurance_id[:4]}****")
+        results = [{"title": h.get("title", ""), "snippet": h.get(
+            "description", "")} for h in hits[:3]]
+        logger.info(
+            f"You.com search returned {len(results)} results for insurance_id: {insurance_id[:4]}****")
         return {"results": results, "query": query}
     except Exception as e:
         logger.error(f"You.com search failed: {e}")
@@ -418,39 +452,65 @@ Rules:
 Transcript:
 {transcript}"""
 
-def extract_patient_info(messages: list[dict], raw_hint: str = "") -> dict:
-    """Extract structured patient fields from conversation history using Claude.
 
-    raw_hint: the unredacted latest patient message — used to recover fields
-    like DOB or phone that were scrubbed from the LLM-facing transcript.
+def _extract_structured_fields_locally(raw_text: str) -> dict:
+    """Extract DOB and phone from raw text using local regex -- no API call.
+
+    These fields get redacted before the transcript reaches any LLM,
+    so we capture them here to avoid sending raw PHI externally.
     """
+    result = {}
+    dob_match = re.search(
+        r"(?:DOB|Date\s+of\s+Birth|born|birthday|birth\s+date)"
+        r"(?:\s+is)?\s*:?\s*"
+        r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+        raw_text, re.IGNORECASE,
+    )
+    if dob_match:
+        result["dob"] = dob_match.group(1)
+
+    phone_match = re.search(
+        r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}",
+        raw_text,
+    )
+    if phone_match:
+        result["phone"] = phone_match.group()
+
+    return result
+
+
+def extract_patient_info(messages: list[dict], raw_text: str = "") -> dict:
+    """Extract structured patient fields from conversation history.
+
+    Claude receives only the redacted transcript (no raw PHI).
+    DOB and phone are extracted locally via regex from raw_text
+    since those fields are redacted before the transcript is built.
+    """
+    local_fields = _extract_structured_fields_locally(
+        raw_text) if raw_text else {}
+
     transcript = "\n".join(
         f"{'Patient' if m['role'] == 'user' else 'Agent'}: {m['content']}"
         for m in messages[-8:]
         if isinstance(m.get("content"), str)
     )
-    if not transcript.strip() and not raw_hint:
-        return {}
-
-    hint_section = ""
-    if raw_hint:
-        hint_section = (
-            f"\n\nNote — patient's most recent unredacted speech (before privacy scan):\n"
-            f"\"{raw_hint}\"\n"
-            "(Use this to capture structured fields like DOB or phone that may appear "
-            "as [REDACTED:...] tokens in the transcript above.)"
-        )
+    if not transcript.strip():
+        return local_fields or {}
 
     try:
         response = _get_anthropic_client().messages.create(
             model="claude-opus-4-6",
             max_tokens=200,
-            messages=[{"role": "user", "content": EXTRACTION_PROMPT.format(transcript=transcript) + hint_section}],
+            messages=[
+                {"role": "user", "content": EXTRACTION_PROMPT.format(transcript=transcript)}],
         )
-        return json.loads(response.content[0].text.strip())
+        llm_fields = json.loads(response.content[0].text.strip())
     except Exception as e:
         logger.error(f"Patient info extraction failed: {e}")
-        return {}
+        llm_fields = {}
+
+    merged = {**llm_fields, **{k: v for k, v in local_fields.items() if v}}
+    return merged
 
 
 # --- Patient database ---
@@ -541,21 +601,24 @@ Return ONLY valid JSON (no markdown, no code fences):
 Default to the General Practitioner (dr_008) if the concern is unclear, general, or doesn't fit another category."""
 
 
-def triage_specialist(reason: str) -> dict | None:
+def triage_specialist(reason: str, api_keys: dict = None) -> dict | None:
     """Use Claude to semantically match a patient's concern to the best specialist."""
+    api_keys = api_keys or {}
     doctors = _load_doctors()
     if not doctors:
-        logger.error("No doctors loaded — cannot triage.")
+        logger.error("No doctors loaded -- cannot triage.")
         return None
 
     specialists_list = "\n".join(
         f"- {d['id']}: {d['name']} ({d['specialty']}, available {d['availability']}) "
-        f"— treats: {', '.join(d['conditions'][:6])}"
+        f"-- treats: {', '.join(d['conditions'][:6])}"
         for d in doctors
     )
 
+    anthropic_key = api_keys.get("ANTHROPIC_API_KEY")
+    client = anthropic.Anthropic(api_key=anthropic_key) if anthropic_key else _get_anthropic_client()
     try:
-        response = _get_anthropic_client().messages.create(
+        response = client.messages.create(
             model="claude-opus-4-6",
             max_tokens=200,
             messages=[{"role": "user", "content": TRIAGE_PROMPT.format(
@@ -568,7 +631,8 @@ def triage_specialist(reason: str) -> dict | None:
         if raw.startswith("```"):
             raw = raw.split("```")[1].lstrip("json").strip()
         result = json.loads(raw)
-        logger.info(f"Triage result: {result.get('specialist_name')} ({result.get('specialty')})")
+        logger.info(
+            f"Triage result: {result.get('specialist_name')} ({result.get('specialty')})")
         return result
     except Exception as e:
         logger.error(f"Triage specialist failed: {e}")
@@ -584,10 +648,11 @@ _CACHE_MAX = 256
 
 # Set DLP_ENABLE_VALIDATION=true to turn on the OpenAI second-opinion step.
 # Off by default — it adds 1-2s latency and is redundant for most voice/realtime paths.
-_ENABLE_VALIDATION = os.getenv("DLP_ENABLE_VALIDATION", "false").lower() == "true"
+_ENABLE_VALIDATION = os.getenv(
+    "DLP_ENABLE_VALIDATION", "false").lower() == "true"
 
 
-def scan_and_clean(text: str, user_id: str = "anonymous") -> dict:
+def scan_and_clean(text: str, user_id: str = "anonymous", api_keys: dict = None) -> dict:
     """
     Full DLP pipeline. Input: raw text. Output: findings, redacted text, safe_to_send flag.
 
@@ -598,28 +663,36 @@ def scan_and_clean(text: str, user_id: str = "anonymous") -> dict:
     - OpenAI second-opinion is disabled by default; set DLP_ENABLE_VALIDATION=true to enable.
     - Baseten model is configurable via BASETEN_MODEL env var.
     """
+    api_keys = api_keys or {}
     cache_key = hashlib.md5(text.encode()).hexdigest()
     if cache_key in _scan_cache:
         cached = _scan_cache[cache_key]
         log_scan(user_id, cached)  # still audit-log every access
         return cached
 
+    # Step 1: regex scan on raw text (local, no API calls)
     regex_hits = regex_scan(text)
-    escalate   = baseten_triage(text)
+
+    # Step 2: redact structured PII/PHI BEFORE any external API call
+    redacted = redact_text(text, regex_hits)
+
+    # Step 3+: LLM layers only see the redacted text -- never raw PHI
+    escalate = baseten_triage(redacted, api_keys=api_keys)
 
     semantic_hits = []
     openai_result = None
 
     if escalate:
-        semantic_hits = claude_semantic_scan(text)
+        semantic_hits = claude_semantic_scan(redacted, api_keys=api_keys)
         if _ENABLE_VALIDATION:
-            high_severity = [f for f in semantic_hits if f.get("severity") == "high"]
+            high_severity = [
+                f for f in semantic_hits if f.get("severity") == "high"]
             if high_severity:
-                openai_result = openai_second_opinion(text, high_severity)
+                openai_result = openai_second_opinion(high_severity, api_keys=api_keys)
 
-    clean = redact_text(text, regex_hits)
-    clean = redact_semantic_findings(clean, semantic_hits)
-    safe  = len(regex_hits) == 0 and len(semantic_hits) == 0
+    # Apply semantic redaction on top of regex-redacted text
+    clean = redact_semantic_findings(redacted, semantic_hits)
+    safe = len(regex_hits) == 0 and len(semantic_hits) == 0
 
     result = {
         "original":           text,

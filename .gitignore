@@ -6,3 +6,5 @@ dlp_audit_log.jsonl
 *.egg-info/
 build/
 dist/
+.claude/
+.github/copilot-instructions.md

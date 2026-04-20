@@ -54,7 +54,7 @@ Patient speaks (Voicerun STT)
   ┌─────────────────────────────┐
   │    Onboarding & Triage      │
   │                             │
-  │  Extract patient fields     │  ← name, DOB, phone, reason (raw_hint bypass)
+  │  Extract patient fields     │  ← name, reason via LLM; DOB, phone via local regex
   │  Lookup patient DB          │  ← returning vs. new patient
   │  Triage to specialist       │  ← Claude semantic match → doctors DB
   │  Save new patient record    │  ← written back to patients.json

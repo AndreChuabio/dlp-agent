@@ -82,7 +82,8 @@ def _build_system_prompt(
 
     else:
         # New patient — show progress
-        collected = {k: v for k, v in patient_info.items() if v and v not in (None, "null", "")}
+        collected = {k: v for k, v in patient_info.items(
+        ) if v and v not in (None, "null", "")}
         prompt += "NEW PATIENT — collecting basic info before triage.\n"
         if collected:
             prompt += f"  Collected so far: {collected}\n"
@@ -159,7 +160,8 @@ async def handler(event: Event, context: Context):
         api_keys = context.get_data("api_keys") or {}
 
         # --- 1. DLP scan — raw speech never reaches the LLM ---
-        dlp_result = scan_and_clean(raw_message, user_id=session_id, api_keys=api_keys)
+        dlp_result = scan_and_clean(
+            raw_message, user_id=session_id, api_keys=api_keys)
         yield DebugEvent(
             event_name="dlp_scan",
             event_data={
@@ -168,7 +170,8 @@ async def handler(event: Event, context: Context):
                 "semantic_hits":     len(dlp_result["semantic_findings"]),
                 "baseten_escalated": dlp_result.get("baseten_escalated"),
                 "finding_types":     [f["type"] for f in dlp_result["regex_findings"]] +
-                                     [f["type"] for f in dlp_result["semantic_findings"]],
+                                     [f["type"]
+                                         for f in dlp_result["semantic_findings"]],
             },
             direction="output",
             context={},
@@ -181,7 +184,8 @@ async def handler(event: Event, context: Context):
         messages.append(UserMessage(content=clean_message))
 
         # --- 2. Extract structured patient fields ---
-        # raw_hint lets Claude recover fields (DOB, phone) that were redacted in the transcript
+        # DOB and phone are extracted locally via regex from raw_message.
+        # Claude only sees the redacted transcript -- never raw PHI.
         raw_msgs = [
             {
                 "role": "user" if isinstance(m, UserMessage) else "assistant",
@@ -189,7 +193,8 @@ async def handler(event: Event, context: Context):
             }
             for m in messages
         ]
-        new_info = extract_patient_info(raw_msgs, raw_hint=raw_message, api_keys=api_keys)
+        new_info = extract_patient_info(
+            raw_msgs, raw_text=raw_message, api_keys=api_keys)
 
         # Merge: accumulate across turns, don't overwrite with null
         current_info = context.get_data("patient_info") or {}
@@ -227,7 +232,8 @@ async def handler(event: Event, context: Context):
 
             yield DebugEvent(
                 event_name="patient_lookup",
-                event_data={"queried_name": patient_name, "found": db_patient is not None},
+                event_data={"queried_name": patient_name,
+                            "found": db_patient is not None},
                 direction="output",
                 context={},
             )
@@ -284,7 +290,8 @@ async def handler(event: Event, context: Context):
                     "max_tokens":  MAX_TOKENS,
                     "timeout":     TIMEOUT,
                 },
-                stream_options={"stream_sentences": True, "clean_sentences": True},
+                stream_options={"stream_sentences": True,
+                                "clean_sentences": True},
             )
 
             async for chunk in stream:

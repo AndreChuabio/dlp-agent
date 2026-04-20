@@ -44,6 +44,7 @@ PATTERNS = {
 
 # --- Regex scan ---
 
+
 def regex_scan(text: str) -> list[dict]:
     """Fast structured PII/PHI detection using regex patterns."""
     findings = []
@@ -59,26 +60,29 @@ def regex_scan(text: str) -> list[dict]:
 
 # --- Baseten triage ---
 
+
 BASETEN_TRIAGE_PROMPT = (
     "Does the following text contain any sensitive, private, or protected health information "
     "such as patient names, diagnoses, medications, medical record numbers, or insurance info? "
     "Reply with only YES or NO.\n\nText: {text}"
 )
 
+
 def baseten_triage(text: str, api_keys: dict) -> bool:
     """Fast binary triage via Baseten DeepSeek. Returns True if text should be deep-scanned."""
     api_key = api_keys.get("BASETEN_API_KEY")
-    model   = api_keys.get("BASETEN_MODEL", "deepseek-ai/DeepSeek-V3.1")
+    model = api_keys.get("BASETEN_MODEL", "deepseek-ai/DeepSeek-V3.1")
 
     if not api_key:
         logger.warning("Baseten key not provided — defaulting to escalate.")
         return True
 
     try:
-        client   = OpenAI(api_key=api_key, base_url=BASETEN_BASE_URL)
+        client = OpenAI(api_key=api_key, base_url=BASETEN_BASE_URL)
         response = client.chat.completions.create(
             model=model,
-            messages=[{"role": "user", "content": BASETEN_TRIAGE_PROMPT.format(text=text)}],
+            messages=[
+                {"role": "user", "content": BASETEN_TRIAGE_PROMPT.format(text=text)}],
             max_tokens=5,
             temperature=0,
         )
@@ -91,15 +95,19 @@ def baseten_triage(text: str, api_keys: dict) -> bool:
 
 # --- Claude semantic scan ---
 
+
 CLAUDE_SCAN_PROMPT = """Analyze the following medical/healthcare text for sensitive protected health information (PHI).
 
-Regex already caught structured identifiers. Focus on SEMANTIC and CONTEXTUAL PHI:
-- Diagnoses, conditions, symptoms
+Structured identifiers (SSN, MRN, DOB, etc.) have already been redacted and appear as [REDACTED:TYPE] tokens.
+Focus on SEMANTIC and CONTEXTUAL PHI that regex cannot catch:
+- Diagnoses, conditions, symptoms described in natural language
 - Medications, dosages, treatment plans
 - Mental health information (extra protected under 42 CFR Part 2)
 - Lab results, imaging, procedures
 - Insurance or billing context
 - Anything that could identify a patient even without their name
+
+Ignore [REDACTED:...] tokens -- those are already handled.
 
 Return ONLY valid JSON in this format:
 {{"findings": [{{"type": "...", "excerpt": "...", "reason": "...", "severity": "high|medium|low", "regulation": "HIPAA|GDPR|SOC2|general"}}]}}
@@ -108,6 +116,7 @@ If nothing found, return: {{"findings": []}}
 
 Text: {text}"""
 
+
 def claude_semantic_scan(text: str, api_keys: dict) -> list[dict]:
     """Deep contextual PHI detection via Claude Haiku."""
     api_key = api_keys.get("ANTHROPIC_API_KEY")
@@ -115,11 +124,12 @@ def claude_semantic_scan(text: str, api_keys: dict) -> list[dict]:
         logger.warning("Anthropic key not provided — skipping semantic scan.")
         return []
     try:
-        client   = anthropic.Anthropic(api_key=api_key)
+        client = anthropic.Anthropic(api_key=api_key)
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=512,
-            messages=[{"role": "user", "content": CLAUDE_SCAN_PROMPT.format(text=text)}],
+            messages=[
+                {"role": "user", "content": CLAUDE_SCAN_PROMPT.format(text=text)}],
         )
         raw = response.content[0].text.strip()
         if raw.startswith("```"):
@@ -133,17 +143,21 @@ def claude_semantic_scan(text: str, api_keys: dict) -> list[dict]:
 
 # --- Redactor ---
 
+
 def redact_text(text: str, regex_findings: list[dict]) -> str:
     """Replace regex-matched findings in-place with [REDACTED:TYPE] tokens."""
     for finding in sorted(regex_findings, key=lambda x: x["start"], reverse=True):
-        text = text[:finding["start"]] + f"[REDACTED:{finding['type'].upper()}]" + text[finding["end"]:]
+        text = text[:finding["start"]] + \
+            f"[REDACTED:{finding['type'].upper()}]" + text[finding["end"]:]
     return text
 
 # --- Audit logger ---
 
+
 def log_scan(user_id: str, result: dict) -> None:
     """Append scan result to HIPAA audit log (JSONL)."""
-    high_severity = any(f.get("severity") == "high" for f in result["semantic_findings"])
+    high_severity = any(f.get("severity") ==
+                        "high" for f in result["semantic_findings"])
     entry = {
         "timestamp":         datetime.utcnow().isoformat(),
         "user_id":           user_id,
@@ -163,6 +177,7 @@ def log_scan(user_id: str, result: dict) -> None:
 
 # --- Patient info extractor ---
 
+
 EXTRACTION_PROMPT = """You are a structured data extraction assistant for a medical onboarding agent.
 Given a voice conversation transcript, extract any patient information mentioned so far.
 Respond with ONLY valid JSON — no markdown, no explanation.
@@ -177,46 +192,78 @@ Rules:
 Transcript:
 {transcript}"""
 
-def extract_patient_info(messages: list[dict], raw_hint: str = "", api_keys: dict = None) -> dict:
-    """Extract structured patient fields from conversation history using Claude."""
+
+def _extract_structured_fields_locally(raw_text: str) -> dict:
+    """Extract DOB and phone from raw text using local regex -- no API call.
+
+    These fields get redacted before the transcript reaches any LLM,
+    so we capture them here to avoid sending raw PHI externally.
+    """
+    result = {}
+    dob_match = re.search(
+        r"(?:DOB|Date\s+of\s+Birth|born|birthday|birth\s+date)"
+        r"(?:\s+is)?\s*:?\s*"
+        r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+        raw_text, re.IGNORECASE,
+    )
+    if dob_match:
+        result["dob"] = dob_match.group(1)
+
+    phone_match = re.search(
+        r"\(?\d{3}\)?[-.\ s]?\d{3}[-.\ s]?\d{4}",
+        raw_text,
+    )
+    if phone_match:
+        result["phone"] = phone_match.group()
+
+    return result
+
+
+def extract_patient_info(messages: list[dict], raw_text: str = "", api_keys: dict = None) -> dict:
+    """Extract structured patient fields from conversation history.
+
+    Claude receives only the redacted transcript (no raw PHI).
+    DOB and phone are extracted locally via regex from raw_text
+    since those fields are redacted before the transcript is built.
+    """
     api_keys = api_keys or {}
-    api_key  = api_keys.get("ANTHROPIC_API_KEY")
+    api_key = api_keys.get("ANTHROPIC_API_KEY")
+
+    local_fields = _extract_structured_fields_locally(
+        raw_text) if raw_text else {}
+
     if not api_key:
-        return {}
+        return local_fields or {}
 
     transcript = "\n".join(
         f"{'Patient' if m['role'] == 'user' else 'Agent'}: {m['content']}"
         for m in messages[-8:]
         if isinstance(m.get("content"), str)
     )
-    if not transcript.strip() and not raw_hint:
-        return {}
-
-    hint_section = ""
-    if raw_hint:
-        hint_section = (
-            f"\n\nNote — patient's most recent unredacted speech (before privacy scan):\n"
-            f"\"{raw_hint}\"\n"
-            "(Use this to capture structured fields like DOB or phone that appear as "
-            "[REDACTED:...] tokens in the transcript above.)"
-        )
+    if not transcript.strip():
+        return local_fields or {}
 
     try:
-        client   = anthropic.Anthropic(api_key=api_key)
+        client = anthropic.Anthropic(api_key=api_key)
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=200,
-            messages=[{"role": "user", "content": EXTRACTION_PROMPT.format(transcript=transcript) + hint_section}],
+            messages=[
+                {"role": "user", "content": EXTRACTION_PROMPT.format(transcript=transcript)}],
         )
-        return json.loads(response.content[0].text.strip())
+        llm_fields = json.loads(response.content[0].text.strip())
     except Exception as e:
         logger.error(f"Patient info extraction failed: {e}")
-        return {}
+        llm_fields = {}
+
+    merged = {**llm_fields, **{k: v for k, v in local_fields.items() if v}}
+    return merged
 
 # --- Patient database ---
 
-_DATA_DIR    = os.path.join(os.path.dirname(__file__), "data")
-DOCTORS_FILE  = os.path.join(_DATA_DIR, "doctors.json")
+
+_DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+DOCTORS_FILE = os.path.join(_DATA_DIR, "doctors.json")
 PATIENTS_FILE = os.path.join(_DATA_DIR, "patients.json")
 
 
@@ -252,7 +299,7 @@ def lookup_patient(name: str) -> dict | None:
     """Look up a patient by name (exact or partial match)."""
     if not name or not name.strip():
         return None
-    patients   = _load_patients()
+    patients = _load_patients()
     name_clean = name.lower().strip()
     for p in patients:
         if p.get("name", "").lower().strip() == name_clean:
@@ -260,7 +307,7 @@ def lookup_patient(name: str) -> dict | None:
     name_words = set(name_clean.split())
     for p in patients:
         db_words = set(p.get("name", "").lower().split())
-        overlap  = name_words & db_words
+        overlap = name_words & db_words
         if len(overlap) >= 2 or (len(name_words) == 1 and name_words <= db_words):
             return p
     return None
@@ -269,7 +316,7 @@ def lookup_patient(name: str) -> dict | None:
 def save_patient(patient: dict) -> bool:
     """Insert or update a patient record (matched by name)."""
     patients = _load_patients()
-    name     = patient.get("name", "").lower().strip()
+    name = patient.get("name", "").lower().strip()
     if not name:
         return False
     for i, p in enumerate(patients):
@@ -281,6 +328,7 @@ def save_patient(patient: dict) -> bool:
     return _save_patients(patients)
 
 # --- Specialist triage ---
+
 
 TRIAGE_PROMPT = """You are a medical triage assistant helping a primary care receptionist route patients.
 Based on the patient's concern, pick the BEST matching specialist from the list below.
@@ -299,7 +347,7 @@ Default to the General Practitioner (dr_008) if the concern is unclear or doesn'
 def triage_specialist(reason: str, api_keys: dict = None) -> dict | None:
     """Use Claude to semantically match a patient's concern to the best specialist."""
     api_keys = api_keys or {}
-    api_key  = api_keys.get("ANTHROPIC_API_KEY")
+    api_key = api_keys.get("ANTHROPIC_API_KEY")
     if not api_key:
         logger.warning("Anthropic key not provided — cannot triage.")
         return None
@@ -316,7 +364,7 @@ def triage_specialist(reason: str, api_keys: dict = None) -> dict | None:
     )
 
     try:
-        client   = anthropic.Anthropic(api_key=api_key)
+        client = anthropic.Anthropic(api_key=api_key)
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=200,
@@ -329,7 +377,8 @@ def triage_specialist(reason: str, api_keys: dict = None) -> dict | None:
         if raw.startswith("```"):
             raw = raw.split("```")[1].lstrip("json").strip()
         result = json.loads(raw)
-        logger.info(f"Triage: {result.get('specialist_name')} ({result.get('specialty')})")
+        logger.info(
+            f"Triage: {result.get('specialist_name')} ({result.get('specialty')})")
         return result
     except Exception as e:
         logger.error(f"Triage specialist failed: {e}")
@@ -337,13 +386,14 @@ def triage_specialist(reason: str, api_keys: dict = None) -> dict | None:
 
 # --- Full pipeline ---
 
+
 _scan_cache: dict[str, dict] = {}
 _CACHE_MAX = 256
 
 
 def scan_and_clean(text: str, user_id: str = "anonymous", api_keys: dict = None) -> dict:
     """Full DLP pipeline. Keys come from context.variables via api_keys dict."""
-    api_keys  = api_keys or {}
+    api_keys = api_keys or {}
     cache_key = hashlib.md5(text.encode()).hexdigest()
 
     if cache_key in _scan_cache:
@@ -351,12 +401,19 @@ def scan_and_clean(text: str, user_id: str = "anonymous", api_keys: dict = None)
         log_scan(user_id, cached)
         return cached
 
-    regex_hits    = regex_scan(text)
-    escalate      = baseten_triage(text, api_keys)
-    semantic_hits = claude_semantic_scan(text, api_keys) if escalate else []
+    # Step 1: regex scan on raw text (local, no API calls)
+    regex_hits = regex_scan(text)
 
-    clean  = redact_text(text, regex_hits)
-    safe   = len(regex_hits) == 0 and len(semantic_hits) == 0
+    # Step 2: redact structured PII/PHI BEFORE any external API call
+    redacted = redact_text(text, regex_hits)
+
+    # Step 3+: LLM layers only see the redacted text -- never raw PHI
+    escalate = baseten_triage(redacted, api_keys)
+    semantic_hits = claude_semantic_scan(
+        redacted, api_keys) if escalate else []
+
+    clean = redacted
+    safe = len(regex_hits) == 0 and len(semantic_hits) == 0
     result = {
         "original":          text,
         "clean":             clean,
