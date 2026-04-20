@@ -5,8 +5,9 @@ Takes a raw production interaction log, DLP-strips it, and reruns it
 turn-by-turn through the agent pipeline — showing exactly where and why
 the agent went off script.
 
-Raw payloads (with real PHI) stay on disk locally and are never sent to an LLM.
-Only the redacted version and the debug trace are returned to the caller.
+The raw payload is scanned and redacted in-memory only; nothing containing
+raw PHI is ever persisted to disk. Only the redacted session file and the
+replay trace (derived from the redacted text) are written.
 """
 
 import json
@@ -30,10 +31,9 @@ def ingest_payload(raw_payload: str, session_name: str) -> dict:
 
     Steps:
       1. Parse into turns (JSON array or freeform text treated as a single user turn)
-      2. DLP-scan and redact every user turn
-      3. Save raw payload  → sessions/<name>.raw.json    (gitignored, local only)
-      4. Save redacted     → sessions/<name>.redacted.json (safe to share/commit)
-      5. Return a summary of what was found — never the raw PHI
+      2. DLP-scan and redact every user turn in-memory
+      3. Save redacted only → sessions/<name>.redacted.json
+      4. Return a summary of what was found — never the raw PHI
 
     session_name: short slug for this debug session, e.g. "ticket-1234"
     """
@@ -63,33 +63,24 @@ def ingest_payload(raw_payload: str, session_name: str) -> dict:
         else:
             redacted_turns.append(turn)
 
-    # --- Persist ---
-    raw_path      = SESSIONS_DIR / f"{session_name}.raw.json"
+    # --- Persist only the redacted copy ---
     redacted_path = SESSIONS_DIR / f"{session_name}.redacted.json"
-
-    raw_path.write_text(json.dumps({
-        "session_name": session_name,
-        "ingested_at":  datetime.utcnow().isoformat(),
-        "turns":        turns,
-    }, indent=2))
-
     redacted_path.write_text(json.dumps({
         "session_name": session_name,
         "ingested_at":  datetime.utcnow().isoformat(),
         "turns":        redacted_turns,
     }, indent=2))
 
-    logger.info(f"Session '{session_name}' saved — raw: {raw_path}, redacted: {redacted_path}")
+    logger.info(f"Session '{session_name}' saved (redacted only) → {redacted_path}")
 
     return {
-        "session_name":      session_name,
-        "turns_total":       len(turns),
-        "user_turns":        sum(1 for t in turns if t.get("role") == "user"),
-        "phi_findings":      total_regex + total_semantic,
-        "finding_types":     list(set(all_finding_types)),
-        "raw_saved_locally": str(raw_path),
-        "redacted_saved":    str(redacted_path),
-        "note": "Raw file stays on your machine. Redacted file is safe to share.",
+        "session_name":   session_name,
+        "turns_total":    len(turns),
+        "user_turns":     sum(1 for t in turns if t.get("role") == "user"),
+        "phi_findings":   total_regex + total_semantic,
+        "finding_types":  list(set(all_finding_types)),
+        "redacted_saved": str(redacted_path),
+        "note": "Raw payload was scanned in-memory only and is not persisted to disk.",
     }
 
 

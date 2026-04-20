@@ -57,4 +57,6 @@ compare the trace to confirm the fix worked.
   The workflow file itself never contains real patient data.
 - The redacted session file (`sessions/ticket-{{TICKET_ID}}.redacted.json`)
   is safe to commit and share with teammates for collaborative debugging.
-- Raw files (`*.raw.json`) are gitignored and stay on your machine only.
+- Raw payloads are scanned in-memory and never written to disk. Any
+  `*.raw.json` files from older runs should be deleted — they were produced
+  by a previous version of `ingest_payload` and are no longer created.

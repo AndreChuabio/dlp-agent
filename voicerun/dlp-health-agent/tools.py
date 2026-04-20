@@ -328,7 +328,7 @@ def _load_doctors() -> list[dict]:
         with open(DOCTORS_FILE) as f:
             return json.load(f).get("doctors", [])
     except Exception as e:
-        logger.error(f"Failed to load doctors: {e}")
+        logger.error("Failed to load doctors (%s).", type(e).__name__)
         return []
 
 
@@ -337,17 +337,31 @@ def _load_patients() -> list[dict]:
         with open(PATIENTS_FILE) as f:
             return json.load(f).get("patients", [])
     except Exception as e:
-        logger.error(f"Failed to load patients: {e}")
+        logger.error("Failed to load patients (%s).", type(e).__name__)
         return []
 
 
 def _save_patients(patients: list[dict]) -> bool:
+    """Persist the patient list atomically with an exclusive file lock.
+
+    Serialises concurrent writers and uses tmp + os.replace so a crash
+    mid-write cannot truncate the live file.
+    """
+    import fcntl
+    lock_path = PATIENTS_FILE + ".lock"
+    tmp_path = PATIENTS_FILE + ".tmp"
     try:
-        with open(PATIENTS_FILE, "w") as f:
-            json.dump({"patients": patients}, f, indent=2)
+        with open(lock_path, "w") as lockf:
+            fcntl.flock(lockf.fileno(), fcntl.LOCK_EX)
+            try:
+                with open(tmp_path, "w") as f:
+                    json.dump({"patients": patients}, f, indent=2)
+                os.replace(tmp_path, PATIENTS_FILE)
+            finally:
+                fcntl.flock(lockf.fileno(), fcntl.LOCK_UN)
         return True
     except Exception as e:
-        logger.error(f"Failed to save patients: {e}")
+        logger.error("Failed to save patients (%s).", type(e).__name__)
         return False
 
 

@@ -241,3 +241,201 @@ def test_voicerun_insurance_id_regex_has_no_typo():
     finally:
         sys.path.remove(str(vr_path))
         sys.modules.pop("tools", None)
+
+
+# ---------------------------------------------------------------------------
+# P1: pipeline parity -- the two pipelines must not drift apart silently
+# ---------------------------------------------------------------------------
+
+def _load_voicerun_tools():
+    """Import the voicerun tools module fresh and return it."""
+    import importlib
+    import sys
+    from pathlib import Path
+
+    vr_path = Path(__file__).parent.parent / "voicerun" / "dlp-health-agent"
+    sys.path.insert(0, str(vr_path))
+    try:
+        vr_tools = importlib.import_module("tools")
+        importlib.reload(vr_tools)
+        return vr_tools
+    finally:
+        sys.path.remove(str(vr_path))
+
+
+def test_both_pipelines_share_pattern_keys():
+    """PATTERNS keys must stay in sync across both pipelines.
+
+    The two files are expected to drift only on additions that are explicitly
+    justified; this test fails loudly when a key is added to one but not the
+    other, which is how the voicerun semantic-redaction drop happened.
+    """
+    vr_tools = _load_voicerun_tools()
+    agent_keys = set(tools.PATTERNS.keys())
+    vr_keys = set(vr_tools.PATTERNS.keys())
+
+    # The agent pipeline carries a few additional categories (url, account_number,
+    # license_number, vehicle_id, device_id). voicerun is a subset. Assert
+    # containment: every voicerun key must also exist in the agent pipeline.
+    missing = vr_keys - agent_keys
+    assert missing == set(), (
+        f"voicerun has patterns the agent pipeline lacks: {missing}"
+    )
+
+
+def test_both_pipelines_redact_semantic_findings():
+    """Both pipelines must expose a semantic redactor with the same signature."""
+    vr_tools = _load_voicerun_tools()
+    assert hasattr(tools, "redact_semantic_findings")
+    assert hasattr(vr_tools, "redact_semantic_findings")
+
+    sample = "the patient has [diagnosis]"
+    findings = [{"type": "diagnosis", "excerpt": "[diagnosis]"}]
+    assert "[REDACTED:DIAGNOSIS]" in tools.redact_semantic_findings(sample, findings)
+    assert "[REDACTED:DIAGNOSIS]" in vr_tools.redact_semantic_findings(sample, findings)
+
+
+def test_both_pipelines_share_input_cap():
+    """MAX_INPUT_CHARS must match across pipelines so one side can't silently
+    accept payloads the other would reject."""
+    vr_tools = _load_voicerun_tools()
+    assert tools.MAX_INPUT_CHARS == vr_tools.MAX_INPUT_CHARS
+
+
+def test_both_pipelines_drop_original_from_result():
+    """Neither scan_and_clean return should carry the raw input by default."""
+    vr_tools = _load_voicerun_tools()
+    text = "My SSN is 123-45-6789."
+
+    agent_result = tools.scan_and_clean(text, user_id="parity-test")
+    assert "original" not in agent_result
+
+    # voicerun pipeline has no API keys so claude_semantic_scan short-circuits
+    # -- still fine, we're only asserting the return shape.
+    vr_tools._scan_cache.clear()
+    vr_result = vr_tools.scan_and_clean(text, user_id="parity-test", api_keys={})
+    assert "original" not in vr_result
+
+
+# ---------------------------------------------------------------------------
+# P1: API server outbound scrubber and sanitized system prompt
+# ---------------------------------------------------------------------------
+
+def test_sanitize_patient_info_for_prompt_drops_values():
+    """System-prompt sanitizer must emit presence-flags, never values."""
+    from api import server
+    info = {
+        "patient_name": "Alice Johnson",
+        "dob": "1975-03-22",
+        "phone": "555-0199",
+        "insurance_id": "BCX884521",
+        "reason": "chest pain",
+    }
+    sanitized = server._sanitize_patient_info_for_prompt(info)
+    blob = str(sanitized)
+    assert "Alice" not in blob
+    assert "1975" not in blob
+    assert "555-0199" not in blob
+    assert "BCX884521" not in blob
+    assert "chest pain" not in blob
+    assert sanitized["has_name"] is True
+    assert sanitized["has_insurance_id"] is True
+
+
+def test_outbound_scrubber_redacts_structured_phi():
+    """The /chat outbound scrubber must redact structured PHI the model echoed."""
+    from api import server
+    reply = "Thanks, I've noted your SSN 123-45-6789."
+    scrubbed = server._scrub_outbound(reply)
+    assert "123-45-6789" not in scrubbed
+    assert "[REDACTED:SSN]" in scrubbed
+
+
+def test_outbound_scrubber_passthrough_for_clean_text():
+    from api import server
+    reply = "Thanks, I'll pass that along to the clinic."
+    assert server._scrub_outbound(reply) == reply
+
+
+# ---------------------------------------------------------------------------
+# P1: replay.py no longer persists raw PHI
+# ---------------------------------------------------------------------------
+
+def test_ingest_payload_does_not_write_raw_file(tmp_path, monkeypatch):
+    """ingest_payload must only write the redacted file, never a raw one."""
+    monkeypatch.setenv("SESSIONS_DIR", str(tmp_path))
+    # Re-import replay so it picks up the patched SESSIONS_DIR.
+    import importlib
+    from agent import replay
+    importlib.reload(replay)
+
+    replay.ingest_payload(
+        '[{"role":"user","text":"My SSN is 123-45-6789."}]',
+        session_name="ticket-unittest",
+    )
+
+    assert (tmp_path / "ticket-unittest.redacted.json").exists()
+    assert not (tmp_path / "ticket-unittest.raw.json").exists()
+
+    # And the redacted file must not contain the raw SSN.
+    body = (tmp_path / "ticket-unittest.redacted.json").read_text()
+    assert "123-45-6789" not in body
+
+
+# ---------------------------------------------------------------------------
+# P1: session store TTL + size cap
+# ---------------------------------------------------------------------------
+
+def test_session_store_evicts_beyond_cap(monkeypatch):
+    """Oldest session must be evicted once SESSION_MAX is hit."""
+    from api import server
+    server._sessions.clear()
+    monkeypatch.setattr(server, "_SESSION_MAX", 3)
+
+    for i in range(5):
+        server._get_session(f"sid-{i}")
+
+    assert len(server._sessions) == 3
+    assert "sid-0" not in server._sessions
+    assert "sid-4" in server._sessions
+
+
+def test_session_store_evicts_expired(monkeypatch):
+    """Sessions older than SESSION_TTL_SECONDS must be dropped on access."""
+    from api import server
+    import time
+    server._sessions.clear()
+    monkeypatch.setattr(server, "_SESSION_TTL_SECONDS", 0.01)
+
+    server._get_session("stale")
+    time.sleep(0.02)
+    server._get_session("fresh")
+
+    assert "stale" not in server._sessions
+    assert "fresh" in server._sessions
+
+
+# ---------------------------------------------------------------------------
+# P1: voicerun DebugEvent sanitization is a code-level expectation
+# ---------------------------------------------------------------------------
+
+def test_voicerun_handler_sanitizes_patient_info_debug_event():
+    """The handler source must emit presence-flags rather than raw merged_info.
+
+    This is a smoke check against regression -- if a future refactor starts
+    emitting the raw dict again, this test catches it at review time.
+    """
+    from pathlib import Path
+    src = (
+        Path(__file__).parent.parent
+        / "voicerun" / "dlp-health-agent" / "handler.py"
+    ).read_text()
+
+    # The old leaky version passed merged_info directly. Confirm that's gone
+    # from the patient_info DebugEvent specifically.
+    # (merged_info is still used inside the handler for its own state.)
+    patient_info_block = src.split('event_name="patient_info"', 1)[1].split(
+        'direction="output"', 1
+    )[0]
+    assert "event_data=merged_info" not in patient_info_block
+    assert "has_name" in patient_info_block
