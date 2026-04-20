@@ -210,7 +210,20 @@ BASETEN_API_KEY=
 BASETEN_MODEL=deepseek-ai/DeepSeek-V3.1   # swap to test different triage models
 YOUCOM_API_KEY=
 VOICERUN_API_KEY=
+
+# Pipeline hardening (all optional, safe defaults shown)
+DLP_MAX_INPUT_CHARS=16000                 # hard cap per scan; oversized input returns HTTP 413
+DLP_BASETEN_TIMEOUT=8
+DLP_CLAUDE_TIMEOUT=15
+DLP_OPENAI_TIMEOUT=20
+DLP_DEBUG=false                           # when true, CLI/UI may display original text -- never enable in production
+
+# Session store (in-memory, per-worker)
+SESSION_TTL_SECONDS=1800                  # drop idle sessions after 30 min
+SESSION_MAX=1000                          # evict oldest once cap is hit
 ```
+
+See `docs/P0-hardening.md` and `docs/P1-hardening.md` for the invariants these vars protect.
 
 ---
 
@@ -279,8 +292,12 @@ dlp-agent/
 ├── .veris/
 │   ├── Dockerfile.sandbox           — Veris simulation container
 │   └── veris.yaml                   — Veris environment config
+├── docs/
+│   ├── P0-hardening.md              — leak-surface fixes (pattern dedupe, HMAC cache, input cap, timeouts)
+│   └── P1-hardening.md              — support-surface fixes (file locks, outbound scrubber, session TTL)
 └── tests/
-    └── test_agent.py                — smoke tests
+    ├── test_agent.py                — smoke tests
+    └── test_leaks.py                — 29 regression tests pinning the hardening invariants
 ```
 
 ---
@@ -299,9 +316,12 @@ POST /chat
   "session_id": "...",
   "dlp": {
     "safe_to_send": false,
-    "findings_count": 12
+    "findings_count": 12,
+    "outbound_scrubbed": false            // true if the outbound scrubber caught PHI in the model reply
   }
 }
+
+// Oversized input (> DLP_MAX_INPUT_CHARS) returns HTTP 413.
 
 POST /scan
 {

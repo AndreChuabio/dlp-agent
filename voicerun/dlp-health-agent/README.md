@@ -90,9 +90,11 @@ All events are visible in the Voicerun debugger under the **Debug** tab.
 | Event | When it fires | Key fields |
 |---|---|---|
 | `dlp_scan` | Every turn | `safe_to_send`, `regex_hits`, `semantic_hits`, `baseten_escalated`, `finding_types` |
-| `patient_info` | Every turn | Accumulated structured fields: `patient_name`, `reason`, `dob`, `phone` |
-| `patient_lookup` | Once, after name extracted | `queried_name`, `found` (bool) |
+| `patient_info` | Every turn | Presence flags + lengths only: `has_name`, `has_dob`, `has_phone`, `has_reason`, `name_len`, `reason_len` — values never leave the process |
+| `patient_lookup` | Once, after name extracted | `found` (bool), `queried_name_len` — the actual name is not emitted |
 | `triage_result` | Once, after concern extracted | `specialist_name`, `specialty`, `availability`, `reason` |
+
+Collected values are held only in session state for the system prompt and the `save_patient` call; the debugger UI cannot shoulder-surf PHI. See `docs/P1-hardening.md`.
 
 ---
 
@@ -169,6 +171,7 @@ To change the TTS voice, swap `VOICE` to any Voicerun-supported value (`alloy`, 
 ```
 dlp-health-agent/
 ├── handler.py          — agent entry point (onboarding + triage logic)
+├── tools.py            — local DLP pipeline copy (kept in parity with agent/tools.py via tests)
 ├── README.md
 └── .voicerun/
     └── agent.yaml      — agent metadata
@@ -177,6 +180,8 @@ voicerun/data/          — shared data (one level up)
 ├── doctors.json        — specialist database
 └── patients.json       — patient records
 ```
+
+The voicerun deploy unit must be self-contained for `vr push`, so `tools.py` is duplicated here. Parity tests in `tests/test_leaks.py` fail loudly if the two copies drift on the invariants that matter.
 
 ---
 
