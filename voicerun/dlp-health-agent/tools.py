@@ -1,6 +1,6 @@
 """
 DLP Agent tools — full detection pipeline.
-Order: regex → Baseten triage → Claude semantic → redact → log
+Order: regex → redact → Baseten triage → Claude semantic → redact → log
 
 API keys are passed explicitly via api_keys dict (populated from context.variables in handler).
 No os.getenv or dotenv — Voicerun injects secrets through context.variables at session start.
@@ -10,7 +10,9 @@ import re
 import json
 import logging
 import os
+import hmac
 import hashlib
+import secrets
 import requests
 from datetime import datetime
 
@@ -19,6 +21,18 @@ from openai import OpenAI
 
 LOG_FILE = "dlp_audit_log.jsonl"
 BASETEN_BASE_URL = "https://inference.baseten.co/v1"
+
+# Cap on input size -- keeps a single turn from blowing up Baseten/Claude
+# spend or triggering catastrophic regex backtracking.
+MAX_INPUT_CHARS = 16000
+
+# Per-process random key used to HMAC the cache index. A memory dump of the
+# running worker cannot be reverse-mapped back to the original text.
+_CACHE_HMAC_KEY = secrets.token_bytes(32)
+
+# External-call timeouts (seconds).
+_BASETEN_TIMEOUT = 8.0
+_CLAUDE_TIMEOUT = 15.0
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -31,16 +45,38 @@ PATTERNS = {
     "email":          r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",
     "phone":          r"\b\(?([0-9]{3})\)?[-.\s]?([0-9]{3})[-.\s]?([0-9]{4})\b",
     "api_key":        r"\b(sk-|pk_|AIza)[A-Za-z0-9_\-]{20,}\b",
-    "patient_name":   r"\b(patient|pt\.?)\s+[A-Z][a-z]+\s+[A-Z][a-z]+\b",
+    # Matches "My name is Alice Johnson" / "I am Alice Johnson" / "patient Alice Johnson"
+    "patient_name": (
+        r"(?:name\s+is|I(?:'m|\s+am)|patient|pt\.?)\s+"
+        r"[A-Z][a-z]{1,}(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z]{1,})+"
+    ),
     "medical_record": r"\bMRN[\s:#-]*\d{5,10}\b",
     "npi_number":     r"\bNPI[\s:#-]*\d{10}\b",
-    "icd_code":       r"\b[A-Z]\d{2}\.?\d{0,2}\b",
+    # Case-sensitive (see _CASE_SENSITIVE_PATTERNS) to avoid matching
+    # arbitrary lowercase tokens like "a12".
+    "icd_code":       r"\b[A-Z]\d{2}(?:\.\d{1,2})?\b",
     "dob":            r"\b(DOB|Date of Birth|born)[\s:]+\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
-    "insurance_id":   r"\b(insurance|policy|member)\s*(id|#|number)?[\s:#-is]*[A-Z0-9]{6,15}\b",
-    "medication":     r"\b\d+\s*mg\b",
+    # Fix: prior pattern had a typo (`[\s:#-is]`) that matched stray "i"/"s".
+    "insurance_id":   r"\b(insurance|policy|member)\s*(id|#|number)?[\s:#-]*[A-Z0-9]{6,15}\b",
+    # Require a drug-name token or clinical verb nearby -- avoids matching
+    # "5 mg" in a recipe.
+    "medication": (
+        r"\b\d+\s*mg\s+[A-Za-z]{3,}\b"
+        r"|\b[A-Za-z]{3,}\s+\d+\s*mg\b"
+        r"|\b(?:take|taking|took|takes|prescrib(?:ed|ing)|dose|dosage|on)\s+\d+\s*mg\b"
+    ),
     "ip_address":     r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
     "street_address": r"\b\d+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+(Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln|Way|Court|Ct|Place|Pl)\b",
 }
+
+# Fail loud at import if patterns collide.
+assert len(PATTERNS) == len({k.lower() for k in PATTERNS}), (
+    "Duplicate PATTERNS keys detected"
+)
+
+# Patterns that must be matched case-sensitively to avoid false positives.
+_CASE_SENSITIVE_PATTERNS = {"patient_name", "icd_code"}
+
 
 # --- Regex scan ---
 
@@ -49,7 +85,8 @@ def regex_scan(text: str) -> list[dict]:
     """Fast structured PII/PHI detection using regex patterns."""
     findings = []
     for label, pattern in PATTERNS.items():
-        for match in re.finditer(pattern, text, re.IGNORECASE):
+        flags = 0 if label in _CASE_SENSITIVE_PATTERNS else re.IGNORECASE
+        for match in re.finditer(pattern, text, flags):
             findings.append({
                 "type":  label,
                 "value": match.group(),
@@ -78,7 +115,9 @@ def baseten_triage(text: str, api_keys: dict) -> bool:
         return True
 
     try:
-        client = OpenAI(api_key=api_key, base_url=BASETEN_BASE_URL)
+        client = OpenAI(
+            api_key=api_key, base_url=BASETEN_BASE_URL, timeout=_BASETEN_TIMEOUT,
+        )
         response = client.chat.completions.create(
             model=model,
             messages=[
@@ -90,7 +129,9 @@ def baseten_triage(text: str, api_keys: dict) -> bool:
         logger.info(f"Baseten triage ({model}): {output}")
         return "YES" in output
     except Exception as e:
-        logger.error(f"Baseten triage failed: {e} — defaulting to escalate.")
+        # Provider exception messages can include the request body; logging
+        # only the type keeps scanned text out of app logs.
+        logger.error("Baseten triage failed (%s) — defaulting to escalate.", type(e).__name__)
         return True
 
 # --- Claude semantic scan ---
@@ -124,7 +165,7 @@ def claude_semantic_scan(text: str, api_keys: dict) -> list[dict]:
         logger.warning("Anthropic key not provided — skipping semantic scan.")
         return []
     try:
-        client = anthropic.Anthropic(api_key=api_key)
+        client = anthropic.Anthropic(api_key=api_key, timeout=_CLAUDE_TIMEOUT)
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=512,
@@ -138,7 +179,7 @@ def claude_semantic_scan(text: str, api_keys: dict) -> list[dict]:
         result = json.loads(raw.strip())
         return result.get("findings", [])
     except Exception as e:
-        logger.error(f"Claude semantic scan failed: {e}")
+        logger.error("Claude semantic scan failed (%s).", type(e).__name__)
         return []
 
 # --- Redactor ---
@@ -149,6 +190,21 @@ def redact_text(text: str, regex_findings: list[dict]) -> str:
     for finding in sorted(regex_findings, key=lambda x: x["start"], reverse=True):
         text = text[:finding["start"]] + \
             f"[REDACTED:{finding['type'].upper()}]" + text[finding["end"]:]
+    return text
+
+
+def redact_semantic_findings(text: str, semantic_findings: list[dict]) -> str:
+    """Replace Claude semantic finding excerpts with [REDACTED:TYPE] tokens.
+
+    Uses exact string replacement — if the excerpt was already caught by regex
+    and replaced with a token, the replace is a no-op and is skipped safely.
+    """
+    for finding in semantic_findings:
+        excerpt = finding.get("excerpt", "").strip()
+        if not excerpt:
+            continue
+        label = finding.get("type", "PHI").upper().replace(" ", "_")
+        text = text.replace(excerpt, f"[REDACTED:{label}]")
     return text
 
 # --- Audit logger ---
@@ -173,7 +229,7 @@ def log_scan(user_id: str, result: dict) -> None:
         with open(LOG_FILE, "a") as f:
             f.write(json.dumps(entry) + "\n")
     except Exception as e:
-        logger.error(f"Audit log write failed: {e}")
+        logger.error("Audit log write failed (%s).", type(e).__name__)
 
 # --- Patient info extractor ---
 
@@ -244,7 +300,7 @@ def extract_patient_info(messages: list[dict], raw_text: str = "", api_keys: dic
         return local_fields or {}
 
     try:
-        client = anthropic.Anthropic(api_key=api_key)
+        client = anthropic.Anthropic(api_key=api_key, timeout=_CLAUDE_TIMEOUT)
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=200,
@@ -253,7 +309,7 @@ def extract_patient_info(messages: list[dict], raw_text: str = "", api_keys: dic
         )
         llm_fields = json.loads(response.content[0].text.strip())
     except Exception as e:
-        logger.error(f"Patient info extraction failed: {e}")
+        logger.error("Patient info extraction failed (%s).", type(e).__name__)
         llm_fields = {}
 
     merged = {**llm_fields, **{k: v for k, v in local_fields.items() if v}}
@@ -364,7 +420,7 @@ def triage_specialist(reason: str, api_keys: dict = None) -> dict | None:
     )
 
     try:
-        client = anthropic.Anthropic(api_key=api_key)
+        client = anthropic.Anthropic(api_key=api_key, timeout=_CLAUDE_TIMEOUT)
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=200,
@@ -381,20 +437,48 @@ def triage_specialist(reason: str, api_keys: dict = None) -> dict | None:
             f"Triage: {result.get('specialist_name')} ({result.get('specialty')})")
         return result
     except Exception as e:
-        logger.error(f"Triage specialist failed: {e}")
+        logger.error("Triage specialist failed (%s).", type(e).__name__)
         return None
 
 # --- Full pipeline ---
 
 
 _scan_cache: dict[str, dict] = {}
-_CACHE_MAX = 256
+_CACHE_MAX = 128
+
+
+def _cache_key(text: str) -> str:
+    return hmac.new(_CACHE_HMAC_KEY, text.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def scan_and_clean(text: str, user_id: str = "anonymous", api_keys: dict = None) -> dict:
-    """Full DLP pipeline. Keys come from context.variables via api_keys dict."""
+    """Full DLP pipeline. Keys come from context.variables via api_keys dict.
+
+    Order of operations:
+      1. regex scan on raw text (local, no API calls)
+      2. redact structured PII/PHI in-place
+      3. Baseten triage on the redacted text (advisory signal only)
+      4. Claude semantic scan on the redacted text (always runs -- Baseten's
+         vote no longer gates it, so a single cheap-model false negative
+         cannot skip the semantic check)
+      5. Apply semantic redaction
+
+    Returns:
+      dict with `clean`, findings, and metadata. The raw input is never
+      stored in the return value or the in-memory cache.
+
+    Raises:
+      ValueError: if text exceeds MAX_INPUT_CHARS.
+    """
+    if text is None:
+        raise ValueError("text is required")
+    if len(text) > MAX_INPUT_CHARS:
+        raise ValueError(
+            f"Input exceeds MAX_INPUT_CHARS ({MAX_INPUT_CHARS}); reject upstream."
+        )
+
     api_keys = api_keys or {}
-    cache_key = hashlib.md5(text.encode()).hexdigest()
+    cache_key = _cache_key(text)
 
     if cache_key in _scan_cache:
         cached = _scan_cache[cache_key]
@@ -407,15 +491,18 @@ def scan_and_clean(text: str, user_id: str = "anonymous", api_keys: dict = None)
     # Step 2: redact structured PII/PHI BEFORE any external API call
     redacted = redact_text(text, regex_hits)
 
-    # Step 3+: LLM layers only see the redacted text -- never raw PHI
+    # Step 3: Baseten triage is advisory only -- it records whether the cheap
+    # model thought escalation was warranted, but does not gate semantic scan.
     escalate = baseten_triage(redacted, api_keys)
-    semantic_hits = claude_semantic_scan(
-        redacted, api_keys) if escalate else []
 
-    clean = redacted
+    # Step 4: Claude semantic scan always runs on redacted text.
+    semantic_hits = claude_semantic_scan(redacted, api_keys)
+
+    # Step 5: apply semantic redaction on top of regex-redacted text.
+    clean = redact_semantic_findings(redacted, semantic_hits)
     safe = len(regex_hits) == 0 and len(semantic_hits) == 0
+
     result = {
-        "original":          text,
         "clean":             clean,
         "regex_findings":    regex_hits,
         "semantic_findings": semantic_hits,

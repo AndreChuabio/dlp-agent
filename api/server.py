@@ -12,7 +12,12 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from pydantic import BaseModel
 from agent.orchestrator import run
-from agent.tools import scan_and_clean, extract_patient_info, search_insurance_coverage
+from agent.tools import (
+    MAX_INPUT_CHARS,
+    scan_and_clean,
+    extract_patient_info,
+    search_insurance_coverage,
+)
 import anthropic
 
 logger = logging.getLogger(__name__)
@@ -67,7 +72,12 @@ def _require_api_key(api_key: str = Security(_api_key_header)) -> str:
 
 @app.exception_handler(Exception)
 async def _global_error_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled error on {request.url.path}: {exc}", exc_info=True)
+    # Log the exception type but never the message or traceback -- SDK
+    # exceptions from Anthropic / OpenAI / psycopg2 can echo the request
+    # body on .body / .request attributes, which would put PHI into app logs.
+    logger.error(
+        "Unhandled error on %s (%s)", request.url.path, type(exc).__name__,
+    )
     return JSONResponse(
         status_code=500,
         content={"error": "Internal server error", "code": "INTERNAL_ERROR"},
@@ -107,9 +117,21 @@ class ChatRequest(BaseModel):
 # Endpoints
 # ---------------------------------------------------------------------------
 
+def _reject_if_oversized(text: str) -> None:
+    if len(text) > MAX_INPUT_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "error": f"Input exceeds maximum of {MAX_INPUT_CHARS} characters",
+                "code": "INPUT_TOO_LARGE",
+            },
+        )
+
+
 @app.post("/scan")
 @limiter.limit("60/minute")
 def scan(request: Request, req: ScanRequest, api_key: str = Security(_require_api_key)):
+    _reject_if_oversized(req.text)
     result = run(text=req.text, user_id=req.user_id)
     return result
 
@@ -118,6 +140,7 @@ def scan(request: Request, req: ScanRequest, api_key: str = Security(_require_ap
 @limiter.limit("30/minute")
 def chat(request: Request, req: ChatRequest, api_key: str = Security(_require_api_key)):
     """Veris-compatible chat endpoint. Runs full DLP pipeline before LLM."""
+    _reject_if_oversized(req.message)
     session = _sessions.setdefault(req.session_id, {"messages": [], "patient_info": {}, "coverage": None})
 
     dlp_result = scan_and_clean(req.message, user_id=req.session_id)
