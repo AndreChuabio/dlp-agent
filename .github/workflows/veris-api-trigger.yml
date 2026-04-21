@@ -123,10 +123,16 @@ jobs:
               sims_json = sims_resp.json()
               sim_list  = sims_json.get("items", sims_json) if isinstance(sims_json, dict) else sims_json
 
-          # Pass/fail counts -- depends on Veris reporting per-sim status.
+          # Some /simulations responses return a list of sim IDs (strings)
+          # rather than sim objects -- defend against both. If the items are
+          # dicts, we can compute per-sim pass/fail; otherwise we only know
+          # the total count.
+          def _status(s):
+              return s.get("status") if isinstance(s, dict) else None
+
           total  = len(sim_list)
-          passed = sum(1 for s in sim_list if s.get("status") == "completed")
-          failed = sum(1 for s in sim_list if s.get("status") == "failed")
+          passed = sum(1 for s in sim_list if _status(s) == "completed")
+          failed = sum(1 for s in sim_list if _status(s) == "failed")
 
           sf = os.getenv("GITHUB_STEP_SUMMARY")
           if sf:
