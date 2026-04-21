@@ -1,21 +1,41 @@
 name: Trigger Veris Simulation (API)
 
+# Feedback loop for the DLP + voice agent:
+#   - `workflow_dispatch` lets us smoke-test on demand
+#   - `push` to main runs the full adversarial sim after every merge so
+#     regressions in detection/redaction surface within one run window
+#   - nightly cron catches drift from model updates or Veris scenario changes
 on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Image tag to test (default: latest)"
+        description: "Image tag to test"
         required: false
         default: "latest"
+  push:
+    branches: [main]
+    paths:
+      - "agent/**"
+      - "api/**"
+      - "voicerun/**"
+      - "tests/**"
+      - ".github/workflows/veris-api-trigger.yml"
+  schedule:
+    - cron: "0 7 * * *"  # 07:00 UTC daily
 
 env:
   VERIS_ENV_ID: "env_28owwq0q0dng0633a5glk"
   VERIS_SCENARIO_SET_ID: "scenset_mczzu6keewjb3r6aanlm0"
+  # Poll for up to 30 min -- observed runs take ~16m so 10m was timing out
+  # every dispatch before the simulation could report completion.
+  POLL_TIMEOUT_SECONDS: "1800"
+  POLL_INTERVAL_SECONDS: "30"
 
 jobs:
   trigger-veris:
     name: Trigger & Poll Veris Run
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - name: Install requests
         run: pip install requests
@@ -24,10 +44,10 @@ jobs:
         id: trigger
         env:
           VERIS_API_KEY: ${{ secrets.VERIS_API_KEY }}
-          INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
+          INPUT_IMAGE_TAG: ${{ inputs.image_tag || 'latest' }}
         run: |
           python3 - <<'EOF'
-          import os, json, requests, sys
+          import os, requests, sys
 
           base    = "https://sandbox.api.veris.ai/v1"
           headers = {"Authorization": f"Bearer {os.environ['VERIS_API_KEY']}", "Content-Type": "application/json"}
@@ -39,8 +59,20 @@ jobs:
           }
 
           resp = requests.post(f"{base}/runs", headers=headers, json=payload, timeout=30)
-          resp.raise_for_status()
-          run_id = resp.json()["id"]
+          if not resp.ok:
+              # Surface the API's error body -- the old workflow silently
+              # KeyError'd on resp.json()["id"] and hid the real cause.
+              print(f"POST /runs failed: {resp.status_code}")
+              print(resp.text[:2000])
+              sys.exit(1)
+
+          body = resp.json()
+          # Veris API returns `run_id` -- the old workflow used `id` which
+          # raised KeyError on every call and failed the job in <1s.
+          run_id = body.get("run_id") or body.get("id")
+          if not run_id:
+              print(f"No run id in response: {body}")
+              sys.exit(1)
 
           print(f"Run created: {run_id}")
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
@@ -53,44 +85,68 @@ jobs:
           RUN_ID: ${{ steps.trigger.outputs.run_id }}
         run: |
           python3 - <<'EOF'
-          import os, json, requests, sys, time
+          import os, requests, sys, time
 
-          base    = "https://sandbox.api.veris.ai/v1"
-          headers = {"Authorization": f"Bearer {os.environ['VERIS_API_KEY']}"}
-          run_id  = os.environ["RUN_ID"]
-
-          timeout, interval = 600, 15
+          base     = "https://sandbox.api.veris.ai/v1"
+          headers  = {"Authorization": f"Bearer {os.environ['VERIS_API_KEY']}"}
+          run_id   = os.environ["RUN_ID"]
+          timeout  = int(os.environ.get("POLL_TIMEOUT_SECONDS", "1800"))
+          interval = int(os.environ.get("POLL_INTERVAL_SECONDS", "30"))
           deadline = time.time() + timeout
 
+          status = "unknown"
           while time.time() < deadline:
-              r = requests.get(f"{base}/runs/{run_id}", headers=headers, timeout=30)
-              r.raise_for_status()
-              status = r.json().get("status", "")
+              try:
+                  r = requests.get(f"{base}/runs/{run_id}", headers=headers, timeout=30)
+                  r.raise_for_status()
+                  status = r.json().get("status", "")
+              except requests.RequestException as e:
+                  # Transient network / 5xx -- keep polling instead of failing.
+                  print(f"  poll error ({type(e).__name__}), retrying in {interval}s", flush=True)
+                  time.sleep(interval)
+                  continue
+
               print(f"  status: {status}", flush=True)
               if status in ("completed", "failed", "cancelled"):
                   break
               time.sleep(interval)
           else:
-              print("Timed out")
+              print(f"Timed out after {timeout}s (last status: {status})")
               sys.exit(1)
 
-          if status != "completed":
-              print(f"Run ended: {status}")
-              sys.exit(1)
+          # Pull simulations list for the summary whether we passed or failed.
+          sims_resp = requests.get(
+              f"{base}/runs/{run_id}/simulations", headers=headers, timeout=30,
+          )
+          sim_list = []
+          if sims_resp.ok:
+              sims_json = sims_resp.json()
+              sim_list  = sims_json.get("items", sims_json) if isinstance(sims_json, dict) else sims_json
 
-          sims = requests.get(f"{base}/runs/{run_id}/simulations", headers=headers, timeout=30).json()
-          sim_list = sims.get("items", sims) if isinstance(sims, dict) else sims
+          # Pass/fail counts -- depends on Veris reporting per-sim status.
+          total  = len(sim_list)
+          passed = sum(1 for s in sim_list if s.get("status") == "completed")
+          failed = sum(1 for s in sim_list if s.get("status") == "failed")
 
           sf = os.getenv("GITHUB_STEP_SUMMARY")
           if sf:
               lines = [
-                  "## Veris Simulation Results\n",
-                  "| Field | Value |", "|---|---|",
+                  "## Veris Simulation Results",
+                  "",
+                  "| Field | Value |",
+                  "|---|---|",
                   f"| Run ID | `{run_id}` |",
-                  f"| Status | {status} |",
-                  f"| Simulations | {len(sim_list)} |",
-                  f"| View | [Open in Veris](https://sandbox.api.veris.ai/runs/{run_id}) |",
+                  f"| Status | **{status}** |",
+                  f"| Simulations | {total} |",
+                  f"| Passed | {passed} |",
+                  f"| Failed | {failed} |",
+                  f"| Console | https://console.veris.ai/simulations |",
               ]
               open(sf, "a").write("\n".join(lines) + "\n")
               print("\n".join(lines))
+
+          # Fail the job if the run did not complete cleanly so `push` / cron
+          # failures page someone instead of going quietly green.
+          if status != "completed":
+              sys.exit(1)
           EOF
