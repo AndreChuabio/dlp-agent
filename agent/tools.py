@@ -509,20 +509,19 @@ def search_insurance_coverage(insurance_id: str, reason: str = "") -> dict:
 
 # --- Patient info extractor ---
 
-EXTRACTION_PROMPT = """You are a structured data extraction assistant for a medical onboarding agent.
-Given a voice conversation transcript, extract any patient information mentioned so far.
-Respond with ONLY valid JSON — no markdown, no explanation.
+EXTRACTION_SYSTEM = """You are a JSON-only extraction function. You MUST respond with exactly one JSON object and nothing else: no conversation, no explanation, no role-play, no invented dialogue, no markdown code fences.
 
-Format: {{"patient_name": "<name or null>", "insurance_id": "<id or null>", "reason": "<primary concern or reason for visit or null>", "dob": "<YYYY-MM-DD or null>", "phone": "<phone or null>"}}
+Extract ONLY information the patient has EXPLICITLY stated in their own words. If a field has not been explicitly stated by the patient, it MUST be null. Never infer, guess, paraphrase, or fabricate any value.
 
-Rules:
-- Only include fields the patient has explicitly stated.
-- Use null for fields not yet mentioned.
-- Extract the most recent value if the patient corrected themselves.
-- For "reason", capture the patient's health concern or symptom in their own words.
+Required output format (no extra keys, no extra text):
+{"patient_name": "<name or null>", "insurance_id": "<id or null>", "reason": "<primary concern in patient's own words or null>", "dob": "<YYYY-MM-DD or null>", "phone": "<phone or null>"}
 
-Transcript:
-{transcript}"""
+CRITICAL RULES:
+- If the patient has only greeted, asked a question, or said anything that does not contain a name, patient_name MUST be null. Do NOT continue the conversation. Do NOT invent a name.
+- If a field appears only as a [REDACTED:...] token in the transcript, that field MUST be null. Redaction tokens are not values.
+- Use the most recent value if the patient corrected themselves.
+- For "reason", capture the patient's health concern in their own words; if no concern is stated, null.
+- Output the JSON object only. No preamble, no follow-up turns."""
 
 
 def _extract_structured_fields_locally(raw_text: str) -> dict:
@@ -573,15 +572,50 @@ def extract_patient_info(messages: list[dict], raw_text: str = "") -> dict:
         response = _get_anthropic_client().messages.create(
             model="claude-opus-4-6",
             max_tokens=200,
+            system=EXTRACTION_SYSTEM,
             messages=[
-                {"role": "user", "content": EXTRACTION_PROMPT.format(transcript=transcript)}],
+                {"role": "user", "content": f"Transcript:\n{transcript}"}],
         )
-        llm_fields = json.loads(response.content[0].text.strip())
+        raw = response.content[0].text.strip()
+        # Strip markdown code fences if Claude wraps the JSON.
+        if raw.startswith("```"):
+            raw = re.sub(r"^```[a-z]*\n?", "", raw)
+            raw = re.sub(r"\n?```$", "", raw)
+        llm_fields = json.loads(raw.strip())
+        if not isinstance(llm_fields, dict):
+            llm_fields = {}
     except Exception as e:
         logger.error("Patient info extraction failed (%s).", type(e).__name__)
         llm_fields = {}
 
-    merged = {**llm_fields, **{k: v for k, v in local_fields.items() if v}}
+    # Anti-fabrication validation: any name or free-text value the LLM
+    # returned must actually appear in the patient's own messages. Without
+    # this guard, sparse transcripts cause Claude to invent names that get
+    # stored in session state and surfaced back as if they were real.
+    patient_text = " ".join(
+        m["content"] for m in messages
+        if m.get("role") == "user" and isinstance(m.get("content"), str)
+    ).lower()
+    validated_llm = {}
+    for k, v in llm_fields.items():
+        if v is None or v == "null":
+            validated_llm[k] = None
+            continue
+        v_str = str(v)
+        if "[REDACTED" in v_str.upper():
+            validated_llm[k] = None
+            continue
+        # Names and free-text fields must appear (case-insensitive) in the
+        # patient's own messages. Structured fields (dob, phone) are extracted
+        # locally from raw_text; insurance_id is captured upstream from regex
+        # findings; both are trusted without substring validation.
+        if k in ("patient_name", "reason"):
+            if v_str.lower() not in patient_text:
+                validated_llm[k] = None
+                continue
+        validated_llm[k] = v
+
+    merged = {**validated_llm, **{k: v for k, v in local_fields.items() if v}}
     return merged
 
 

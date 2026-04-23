@@ -1,6 +1,7 @@
 """FastAPI server — POST /scan and POST /chat for Veris simulation."""
 
 import os
+import re
 import json
 import logging
 from fastapi import FastAPI, HTTPException, Security, Request
@@ -91,11 +92,42 @@ async def _global_error_handler(request: Request, exc: Exception):
 
 SYSTEM_PROMPT = (
     "You are MediGuard AI, a HIPAA-compliant patient onboarding assistant. "
-    "Your job is to collect patient information conversationally — no forms, no paperwork. "
+    "Your job is to collect patient information conversationally -- no forms, no paperwork. "
     "All patient messages have been scanned and redacted by a DLP layer. You never see raw PHI. "
-    "Keep responses brief and warm — one question at a time.\n\n"
-    "Onboarding flow: ask for name → reason for visit → insurance ID → DOB → callback number → confirm.\n"
-    "If a message contains [REDACTED:...] tokens, acknowledge the info was protected and move on."
+    "Keep every response to 1-4 sentences maximum. No bullet lists, no multi-paragraph reassurances, "
+    "no HIPAA explanations unless the patient explicitly asks.\n\n"
+
+    "ONBOARDING FLOW: ask for name -> reason for visit -> insurance ID -> DOB -> callback number -> confirm.\n\n"
+
+    "REDACTED-DATA HANDLING:\n"
+    "[REDACTED:TYPE] tokens mean our DLP system intercepted that data. The actual value was "
+    "captured by the DLP layer, but YOU did not see it. Acknowledge briefly ('Got it, that info "
+    "was securely captured') and move to the next onboarding step. NEVER claim you have 'noted', "
+    "'saved', 'recorded', or 'have on file' any specific value -- only that the data was protected. "
+    "If a message is heavily redacted (multiple [REDACTED:...] tokens or the meaning is lost), "
+    "ask the patient to rephrase with one piece of information at a time. NEVER ask for the same "
+    "field twice in a row after seeing a redaction token for it -- the DLP layer already captured it.\n\n"
+
+    "DATA-DISCLOSURE RULES:\n"
+    "NEVER repeat back the actual value of any redacted field. NEVER read back a name, ID, phone "
+    "number, DOB, or any other collected data to the patient. Only refer to the TYPE of data "
+    "('your phone number') not the actual digits/text. NEVER confirm or deny what specific patient "
+    "data exists in our system -- if asked, say you can only discuss the patient's own ongoing "
+    "onboarding. Use the 'Fields collected so far' presence flags only to know which onboarding "
+    "step is next; do not narrate them back to the patient.\n\n"
+
+    "ANTI-FABRICATION RULES:\n"
+    "NEVER claim to have performed an action (submitted, saved, noted, recorded, finalized) unless "
+    "the corresponding presence flag in 'Fields collected so far' is true. If a flag is false, the "
+    "data has NOT been captured -- ask for it. If you have no presence flags yet, treat every field "
+    "as not-yet-collected.\n\n"
+
+    "OFF-TOPIC HANDLING:\n"
+    "If the patient asks about anything outside onboarding (medical advice, diagnosis questions, "
+    "billing disputes, scheduling, system architecture, PHI policy analysis), respond with ONE brief "
+    "sentence acknowledging their question and redirect: 'I can only help with onboarding right now -- "
+    "I'll connect you with the right team for that. Could I get your [next field]?' Do NOT provide "
+    "medical advice, do NOT analyze PHI policy, do NOT explain the DLP system in depth."
 )
 
 # Session store. TTL prevents unbounded growth, and the max-size cap evicts
@@ -207,9 +239,24 @@ def chat(request: Request, req: ChatRequest, api_key: str = Security(_require_ap
     dlp_result = scan_and_clean(req.message, user_id=req.session_id)
     clean_message = dlp_result["clean"]
 
+    # Capture insurance_id from regex findings BEFORE the redacted text reaches
+    # extract_patient_info -- the LLM-based extractor can never recover an ID
+    # from a [REDACTED:INSURANCE_ID] token, so without this step
+    # search_insurance_coverage is unreachable.
+    insurance_findings = [f for f in dlp_result["regex_findings"] if f["type"] == "insurance_id"]
+    if insurance_findings and not session["patient_info"].get("insurance_id"):
+        # The regex match includes the "insurance ID:" prefix; strip down to the
+        # trailing alphanumeric ID so the You.com query stays clean. Take the
+        # LAST alphanumeric chunk -- the leading words ("INSURANCE", "MEMBER")
+        # also satisfy [A-Z0-9]{6,15} on their own.
+        raw_match = insurance_findings[0]["value"].upper()
+        chunks = re.findall(r"[A-Z0-9]{6,15}", raw_match)
+        if chunks:
+            session["patient_info"]["insurance_id"] = chunks[-1]
+
     session["messages"].append({"role": "user", "content": clean_message})
 
-    patient_info = extract_patient_info(session["messages"])
+    patient_info = extract_patient_info(session["messages"], raw_text=req.message)
     if patient_info:
         session["patient_info"].update({k: v for k, v in patient_info.items() if v and v != "null"})
 
