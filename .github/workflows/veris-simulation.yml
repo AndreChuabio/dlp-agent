@@ -13,7 +13,6 @@ on:
       - "agent/**"
       - "api/**"
       - "voicerun/**"
-      - "tests/**"
   schedule:
     - cron: "0 7 * * *"  # 07:00 UTC daily
 
