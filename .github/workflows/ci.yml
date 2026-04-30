@@ -25,8 +25,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: |
-          pip install anthropic openai fastapi uvicorn python-dotenv requests pytest slowapi
+        run: pip install -r requirements-dev.txt
 
       - name: Run pure-logic tests (no API)
         env:
@@ -52,8 +51,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: |
-          pip install anthropic openai fastapi uvicorn python-dotenv requests pytest slowapi
+        run: pip install -r requirements-dev.txt
 
       - name: Run full pipeline tests
         env:
@@ -78,8 +76,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: |
-          pip install anthropic openai fastapi uvicorn python-dotenv requests pytest slowapi voicerun-cli || true
+        run: pip install -r requirements-dev.txt voicerun-cli || true
 
       - name: Verify Voicerun handler syntax
         run: |
