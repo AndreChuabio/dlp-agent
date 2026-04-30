@@ -3,36 +3,37 @@ name: Veris Simulation
 on:
   workflow_dispatch:
     inputs:
-      image_tag:
-        description: "Image tag to test (default: latest)"
-        required: false
-        default: "latest"
+      test_type:
+        description: "Test type"
+        type: choice
+        options:
+          - smoke (1 credit)
+          - full (25 credits)
+        default: "smoke (1 credit)"
       dry_run:
-        description: "Dry run (validate config, skip actual simulation)"
+        description: "Dry run (validate only, no simulation)"
         type: boolean
         default: false
+      image_tag:
+        description: "Image tag (default: latest)"
+        required: false
+        default: "latest"
   push:
     branches: [main]
     paths:
-      - "agent/**"
-      - "api/**"
-      - "voicerun/**"
       - ".veris/**"
-  schedule:
-    - cron: "0 7 * * *"  # 07:00 UTC daily
 
 env:
   VERIS_ENV_ID: ${{ vars.VERIS_ENV_ID }}
-  VERIS_SCENARIO_SET_ID: ${{ vars.VERIS_SCENARIO_SET_ID }}
-  POLL_TIMEOUT_SECONDS: "1800"
-  POLL_INTERVAL_SECONDS: "30"
+  VERIS_SCENARIO_SET_SMOKE: ${{ vars.VERIS_SCENARIO_SET_SMOKE }}
+  VERIS_SCENARIO_SET_FULL: ${{ vars.VERIS_SCENARIO_SET_FULL }}
 
 jobs:
-  # Rebuild image only (no simulation) - triggers on Dockerfile changes
+  # Auto-rebuild image on Dockerfile changes (no simulation)
   rebuild-image:
-    name: Rebuild Image Only
+    name: Rebuild Image
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && contains(github.event.head_commit.modified, '.veris/')
+    if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
 
@@ -43,59 +44,54 @@ jobs:
       - name: Install Veris CLI
         run: pip install "veris-cli>=2.22.2"
 
-      - name: Authenticate & push image
+      - name: Push image
         env:
           VERIS_API_KEY: ${{ secrets.VERIS_API_KEY }}
         run: |
           veris login "$VERIS_API_KEY"
           veris env push --env-id ${{ vars.VERIS_ENV_ID }} --tag ${{ github.sha }}
-          echo "✅ Image rebuilt and pushed (no simulation triggered)"
+          echo "✅ Image rebuilt (no simulation)"
 
-  # Full simulation - triggers on agent/api/voicerun changes
-  trigger-veris:
-    name: Trigger & Poll Veris Run
+  # Manual simulation only
+  run-simulation:
+    name: Run Simulation
     runs-on: ubuntu-latest
-    if: github.event_name != 'push' || !contains(github.event.head_commit.modified, '.veris/')
+    if: github.event_name == 'workflow_dispatch'
     timeout-minutes: 40
     steps:
+      - name: Select scenario set
+        id: config
+        run: |
+          if [[ "${{ inputs.test_type }}" == "smoke (1 credit)" ]]; then
+            echo "scenario_set=${{ vars.VERIS_SCENARIO_SET_SMOKE }}" >> $GITHUB_OUTPUT
+            echo "Using SMOKE scenario set (1 credit)"
+          else
+            echo "scenario_set=${{ vars.VERIS_SCENARIO_SET_FULL }}" >> $GITHUB_OUTPUT
+            echo "Using FULL scenario set (25 credits)"
+          fi
+
+      - name: Dry run
+        if: inputs.dry_run
+        run: |
+          echo "🔍 DRY RUN"
+          echo ""
+          echo "Environment:  ${{ vars.VERIS_ENV_ID }}"
+          echo "Scenario Set: ${{ steps.config.outputs.scenario_set }}"
+          echo "Image Tag:    ${{ inputs.image_tag }}"
+          echo "Test Type:    ${{ inputs.test_type }}"
+          echo ""
+          echo "✅ Config valid — no simulation triggered"
+
       - name: Install requests
+        if: ${{ !inputs.dry_run }}
         run: pip install requests
 
-      - name: Dry run check
-        if: inputs.dry_run
-        env:
-          VERIS_API_KEY: ${{ secrets.VERIS_API_KEY }}
-        run: |
-          python3 - <<'EOF'
-          import os, requests
-
-          base    = "https://sandbox.api.veris.ai/v1"
-          headers = {"Authorization": f"Bearer {os.environ['VERIS_API_KEY']}"}
-
-          print("🔍 DRY RUN — validating config\n")
-          print(f"Environment ID:   {os.environ.get('VERIS_ENV_ID', 'NOT SET')}")
-          print(f"Scenario Set ID:  {os.environ.get('VERIS_SCENARIO_SET_ID', 'NOT SET')}")
-          print(f"Image Tag:        ${{ inputs.image_tag || 'latest' }}")
-
-          # Check API connectivity
-          try:
-              r = requests.get(f"{base}/environments/{os.environ['VERIS_ENV_ID']}", headers=headers, timeout=10)
-              if r.ok:
-                  print(f"\n✅ Environment exists")
-              else:
-                  print(f"\n❌ Environment check failed: {r.status_code}")
-          except Exception as e:
-              print(f"\n❌ API error: {e}")
-
-          print("\n✅ Dry run complete — no simulation triggered")
-          EOF
-
-      - name: Trigger simulation run
+      - name: Trigger simulation
         if: ${{ !inputs.dry_run }}
         id: trigger
         env:
           VERIS_API_KEY: ${{ secrets.VERIS_API_KEY }}
-          INPUT_IMAGE_TAG: ${{ inputs.image_tag || 'latest' }}
+          SCENARIO_SET: ${{ steps.config.outputs.scenario_set }}
         run: |
           python3 - <<'EOF'
           import os, requests, sys
@@ -105,27 +101,24 @@ jobs:
 
           payload = {
               "environment_id":  os.environ["VERIS_ENV_ID"],
-              "scenario_set_id": os.environ["VERIS_SCENARIO_SET_ID"],
-              "image_tag":       os.environ.get("INPUT_IMAGE_TAG", "latest"),
+              "scenario_set_id": os.environ["SCENARIO_SET"],
+              "image_tag":       "${{ inputs.image_tag }}",
           }
 
+          print(f"Triggering: {payload}")
           resp = requests.post(f"{base}/runs", headers=headers, json=payload, timeout=30)
           if not resp.ok:
-              # Surface the API's error body -- the old workflow silently
-              # KeyError'd on resp.json()["id"] and hid the real cause.
               print(f"POST /runs failed: {resp.status_code}")
               print(resp.text[:2000])
               sys.exit(1)
 
           body = resp.json()
-          # Veris API returns `run_id` -- the old workflow used `id` which
-          # raised KeyError on every call and failed the job in <1s.
           run_id = body.get("run_id") or body.get("id")
           if not run_id:
-              print(f"No run id in response: {body}")
+              print(f"No run id: {body}")
               sys.exit(1)
 
-          print(f"Run created: {run_id}")
+          print(f"✅ Run created: {run_id}")
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"run_id={run_id}\n")
           EOF
@@ -142,8 +135,8 @@ jobs:
           base     = "https://sandbox.api.veris.ai/v1"
           headers  = {"Authorization": f"Bearer {os.environ['VERIS_API_KEY']}"}
           run_id   = os.environ["RUN_ID"]
-          timeout  = int(os.environ.get("POLL_TIMEOUT_SECONDS", "1800"))
-          interval = int(os.environ.get("POLL_INTERVAL_SECONDS", "30"))
+          timeout  = 1800
+          interval = 30
           deadline = time.time() + timeout
 
           status = "unknown"
@@ -153,8 +146,7 @@ jobs:
                   r.raise_for_status()
                   status = r.json().get("status", "")
               except requests.RequestException as e:
-                  # Transient network / 5xx -- keep polling instead of failing.
-                  print(f"  poll error ({type(e).__name__}), retrying in {interval}s", flush=True)
+                  print(f"  poll error, retrying...", flush=True)
                   time.sleep(interval)
                   continue
 
@@ -163,48 +155,23 @@ jobs:
                   break
               time.sleep(interval)
           else:
-              print(f"Timed out after {timeout}s (last status: {status})")
+              print(f"Timed out (last status: {status})")
               sys.exit(1)
 
-          # Pull simulations list for the summary whether we passed or failed.
-          sims_resp = requests.get(
-              f"{base}/runs/{run_id}/simulations", headers=headers, timeout=30,
-          )
-          sim_list = []
-          if sims_resp.ok:
-              sims_json = sims_resp.json()
-              sim_list  = sims_json.get("items", sims_json) if isinstance(sims_json, dict) else sims_json
-
-          # Some /simulations responses return a list of sim IDs (strings)
-          # rather than sim objects -- defend against both. If the items are
-          # dicts, we can compute per-sim pass/fail; otherwise we only know
-          # the total count.
-          def _status(s):
-              return s.get("status") if isinstance(s, dict) else None
-
-          total  = len(sim_list)
-          passed = sum(1 for s in sim_list if _status(s) == "completed")
-          failed = sum(1 for s in sim_list if _status(s) == "failed")
+          # Summary
+          sims_resp = requests.get(f"{base}/runs/{run_id}/simulations", headers=headers, timeout=30)
+          sim_list = sims_resp.json().get("items", []) if sims_resp.ok else []
 
           sf = os.getenv("GITHUB_STEP_SUMMARY")
           if sf:
               lines = [
-                  "## Veris Simulation Results",
-                  "",
-                  "| Field | Value |",
-                  "|---|---|",
+                  "## Veris Results",
                   f"| Run ID | `{run_id}` |",
                   f"| Status | **{status}** |",
-                  f"| Simulations | {total} |",
-                  f"| Passed | {passed} |",
-                  f"| Failed | {failed} |",
-                  f"| Console | https://console.veris.ai/simulations |",
+                  f"| Simulations | {len(sim_list)} |",
               ]
               open(sf, "a").write("\n".join(lines) + "\n")
-              print("\n".join(lines))
 
-          # Fail the job if the run did not complete cleanly so `push` / cron
-          # failures page someone instead of going quietly green.
           if status != "completed":
               sys.exit(1)
           EOF
