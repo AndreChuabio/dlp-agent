@@ -1,17 +1,17 @@
-ARG GVISOR_BASE=us-central1-docker.pkg.dev/veris-ai-prod/veris-sandbox/veris-gvisor:latest
-FROM ${GVISOR_BASE}
+ARG VERIS_BASE
+FROM ${VERIS_BASE}
 
 WORKDIR /agent
 
-# Install build tools needed for native packages
-RUN apt-get update && apt-get install -y gcc portaudio19-dev && rm -rf /var/lib/apt/lists/*
+# Copy dependency manifest first (for layer caching)
+COPY requirements.txt /agent/
+
+# Install dependencies
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy project code
 COPY agent/ /agent/agent/
 COPY api/ /agent/api/
-COPY requirements.txt /agent/
 
-# Install dependencies from requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
-
-WORKDIR /agent
+# Veris requires ending with WORKDIR /app
+WORKDIR /app
