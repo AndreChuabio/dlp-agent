@@ -7,6 +7,10 @@ on:
         description: "Image tag to test (default: latest)"
         required: false
         default: "latest"
+      dry_run:
+        description: "Dry run (validate config, skip actual simulation)"
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
@@ -31,7 +35,37 @@ jobs:
       - name: Install requests
         run: pip install requests
 
+      - name: Dry run check
+        if: inputs.dry_run
+        env:
+          VERIS_API_KEY: ${{ secrets.VERIS_API_KEY }}
+        run: |
+          python3 - <<'EOF'
+          import os, requests
+
+          base    = "https://sandbox.api.veris.ai/v1"
+          headers = {"Authorization": f"Bearer {os.environ['VERIS_API_KEY']}"}
+
+          print("🔍 DRY RUN — validating config\n")
+          print(f"Environment ID:   {os.environ.get('VERIS_ENV_ID', 'NOT SET')}")
+          print(f"Scenario Set ID:  {os.environ.get('VERIS_SCENARIO_SET_ID', 'NOT SET')}")
+          print(f"Image Tag:        ${{ inputs.image_tag || 'latest' }}")
+
+          # Check API connectivity
+          try:
+              r = requests.get(f"{base}/environments/{os.environ['VERIS_ENV_ID']}", headers=headers, timeout=10)
+              if r.ok:
+                  print(f"\n✅ Environment exists")
+              else:
+                  print(f"\n❌ Environment check failed: {r.status_code}")
+          except Exception as e:
+              print(f"\n❌ API error: {e}")
+
+          print("\n✅ Dry run complete — no simulation triggered")
+          EOF
+
       - name: Trigger simulation run
+        if: ${{ !inputs.dry_run }}
         id: trigger
         env:
           VERIS_API_KEY: ${{ secrets.VERIS_API_KEY }}
@@ -71,6 +105,7 @@ jobs:
           EOF
 
       - name: Poll until complete
+        if: ${{ !inputs.dry_run }}
         env:
           VERIS_API_KEY: ${{ secrets.VERIS_API_KEY }}
           RUN_ID: ${{ steps.trigger.outputs.run_id }}
