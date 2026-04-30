@@ -15,3 +15,4 @@ COPY api/ /agent/api/
 
 # Veris requires ending with WORKDIR /app
 WORKDIR /app
+# no-op: trigger rebuild
