@@ -11,13 +11,7 @@ COPY agent/ /agent/agent/
 COPY api/ /agent/api/
 COPY requirements.txt /agent/
 
-# Install only what the API server needs — skip audio packages
-RUN pip install --no-cache-dir \
-    anthropic \
-    openai \
-    fastapi \
-    uvicorn \
-    python-dotenv \
-    requests
+# Install dependencies from requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 WORKDIR /agent
