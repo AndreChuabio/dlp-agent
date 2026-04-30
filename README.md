@@ -347,4 +347,46 @@ GET /health
 
 ---
 
+## CI/CD
+
+Two GitHub Actions workflows:
+
+| Workflow | Trigger | What it does |
+|----------|---------|--------------|
+| **CI — Tests** | PR to develop/main | Unit tests, integration tests, voicerun smoke test |
+| **Veris Simulation** | Manual only | Adversarial simulation against the DLP agent |
+
+### Veris Simulation
+
+Simulations are **manual-only** to control costs. To run:
+
+1. Go to **Actions** → **Veris Simulation** → **Run workflow**
+2. Select test type:
+   - `smoke (1 credit)` — quick validation with minimal scenarios
+   - `full (25 credits)` — full adversarial suite
+3. Optionally check **Dry run** to validate config without running
+
+Changes to `.veris/**` (Dockerfile, config) auto-rebuild the image on merge — no simulation triggered.
+
+### Required GitHub Configuration
+
+**Secrets** (Settings → Secrets and variables → Actions → Secrets):
+
+| Secret | Description |
+|--------|-------------|
+| `VERIS_API_KEY` | Veris API key |
+| `ANTHROPIC_API_KEY` | For integration tests |
+| `OPENAI_API_KEY` | For integration tests |
+| `BASETEN_API_KEY` | For integration tests |
+
+**Variables** (Settings → Secrets and variables → Actions → Variables):
+
+| Variable | Description |
+|----------|-------------|
+| `VERIS_ENV_ID` | Veris environment ID |
+| `VERIS_SCENARIO_SET_SMOKE` | Scenario set for smoke tests (1 credit) |
+| `VERIS_SCENARIO_SET_FULL` | Scenario set for full tests (25 credits) |
+
+---
+
 Built at Enterprise Agent Jam NYC.
