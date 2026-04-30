@@ -1,15 +1,10 @@
-name: Trigger Veris Simulation (API)
+name: Veris Simulation
 
-# Feedback loop for the DLP + voice agent:
-#   - `workflow_dispatch` lets us smoke-test on demand
-#   - `push` to main runs the full adversarial sim after every merge so
-#     regressions in detection/redaction surface within one run window
-#   - nightly cron catches drift from model updates or Veris scenario changes
 on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Image tag to test"
+        description: "Image tag to test (default: latest)"
         required: false
         default: "latest"
   push:
@@ -19,7 +14,6 @@ on:
       - "api/**"
       - "voicerun/**"
       - "tests/**"
-      - ".github/workflows/veris-api-trigger.yml"
   schedule:
     - cron: "0 7 * * *"  # 07:00 UTC daily
 
