@@ -17,6 +17,7 @@ on:
       - "agent/**"
       - "api/**"
       - "voicerun/**"
+      - ".veris/**"
   schedule:
     - cron: "0 7 * * *"  # 07:00 UTC daily
 
@@ -27,9 +28,34 @@ env:
   POLL_INTERVAL_SECONDS: "30"
 
 jobs:
+  # Rebuild image only (no simulation) - triggers on Dockerfile changes
+  rebuild-image:
+    name: Rebuild Image Only
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && contains(github.event.head_commit.modified, '.veris/')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Veris CLI
+        run: pip install "veris-cli>=2.22.2"
+
+      - name: Authenticate & push image
+        env:
+          VERIS_API_KEY: ${{ secrets.VERIS_API_KEY }}
+        run: |
+          veris login "$VERIS_API_KEY"
+          veris env push --env-id ${{ vars.VERIS_ENV_ID }} --tag ${{ github.sha }}
+          echo "✅ Image rebuilt and pushed (no simulation triggered)"
+
+  # Full simulation - triggers on agent/api/voicerun changes
   trigger-veris:
     name: Trigger & Poll Veris Run
     runs-on: ubuntu-latest
+    if: github.event_name != 'push' || !contains(github.event.head_commit.modified, '.veris/')
     timeout-minutes: 40
     steps:
       - name: Install requests
