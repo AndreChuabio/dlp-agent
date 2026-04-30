@@ -127,10 +127,14 @@ jobs:
 
       - name: Run simulation & evaluation
         run: |
+          GRADER_ARG=""
+          if [ -n "${{ env.VERIS_GRADER_ID }}" ]; then
+            GRADER_ARG="--grader-id ${{ env.VERIS_GRADER_ID }}"
+          fi
           veris run \
             --scenario-set-id ${{ env.VERIS_SCENARIO_SET_ID }} \
             --env-id ${{ env.VERIS_ENV_ID }} \
-            --grader-id ${{ env.VERIS_GRADER_ID }} \
+            $GRADER_ARG \
             --image-tag ${{ github.sha }} \
             > veris-summary.md
           cat veris-summary.md

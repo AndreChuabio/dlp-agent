@@ -24,10 +24,8 @@ on:
     - cron: "0 7 * * *"  # 07:00 UTC daily
 
 env:
-  VERIS_ENV_ID: "env_28owwq0q0dng0633a5glk"
-  VERIS_SCENARIO_SET_ID: "scenset_mczzu6keewjb3r6aanlm0"
-  # Poll for up to 30 min -- observed runs take ~16m so 10m was timing out
-  # every dispatch before the simulation could report completion.
+  VERIS_ENV_ID: ${{ vars.VERIS_ENV_ID }}
+  VERIS_SCENARIO_SET_ID: ${{ vars.VERIS_SCENARIO_SET_ID }}
   POLL_TIMEOUT_SECONDS: "1800"
   POLL_INTERVAL_SECONDS: "30"
 
